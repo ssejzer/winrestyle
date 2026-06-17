@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wr-core",
+    "crates/wr-ipc",
+    "crates/wr-watchdog",
+    "crates/wr-shell",
+    "crates/wr-taskbar",
+    "crates/wr-installer",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["WinRestyle contributors"]
+repository = "https://github.com/ssejzer/winrestyle"
+rust-version = "1.77"
+
+[workspace.dependencies]
+# Internal crates
+wr-core = { path = "crates/wr-core" }
+wr-ipc = { path = "crates/wr-ipc" }
+
+# Windows interop
+windows = "0.58"
+winreg = "0.52"
+
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Logging & errors
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

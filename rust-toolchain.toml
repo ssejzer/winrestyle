@@ -1,0 +1,5 @@
+[toolchain]
+channel = "stable"
+# WinRestyle targets Windows 11 (x86_64). Build with the MSVC toolchain.
+targets = ["x86_64-pc-windows-msvc"]
+components = ["rustfmt", "clippy"]

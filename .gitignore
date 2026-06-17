@@ -1,0 +1,31 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# We commit Cargo.lock for the binaries (apps), per Rust convention.
+# (No lib-only workspace, so keep it tracked.)
+
+# IDE / editor
+/.vs
+/.vscode
+/.idea
+*.user
+
+# Build artifacts / packaging
+/dist
+*.msi
+*.exe~
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+
+# agent directives
+.claude
+.codex
+CLAUDE.md
+AGENTS.md
+

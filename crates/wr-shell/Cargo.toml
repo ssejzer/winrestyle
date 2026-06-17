@@ -1,0 +1,16 @@
+[package]
+name = "wr-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "wr-shell"
+path = "src/main.rs"
+
+[dependencies]
+wr-core = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

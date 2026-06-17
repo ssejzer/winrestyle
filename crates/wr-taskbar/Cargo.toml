@@ -1,0 +1,11 @@
+[package]
+name = "wr-taskbar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+wr-core = { workspace = true }
+log = { workspace = true }
