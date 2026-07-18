@@ -181,7 +181,9 @@ screen, but only for entries whose id contains the substring — the session's
 real startup apps are never launched by a test.
 
 1. Create disposable HKCU `Run` + `RunOnce` values named `WinRestyleT12*`
-   whose commands write marker files.
+   whose commands write marker files. (A fresh Win11 image may lack the HKCU
+   `RunOnce` key entirely — Windows creates it on demand; the harness creates
+   and later removes it. The shell tolerates the missing key by design.)
 2. Start the watchdog with `WR_SHELL_TEST_ARGS=--autostart-test-filter=WinRestyleT12`.
 3. ✅ Pass if both markers appear, and the `RunOnce` value is *deleted* from
    the registry (the Windows RunOnce contract).

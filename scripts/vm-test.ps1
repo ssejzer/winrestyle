@@ -52,6 +52,9 @@ $RunOnceKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
 # restore in the finally block even if the test dies halfway.
 $script:ConfigTouched = $false
 $script:HadConfig     = $false
+# A fresh Win11 image may not have the HKCU RunOnce key at all (Windows
+# creates it on demand); if T12 creates it, cleanup removes it again.
+$script:CreatedRunOnceKey = $false
 
 $script:Results = @()
 
@@ -308,6 +311,10 @@ try {
     Remove-Item $runMarker, $onceMarker -ErrorAction SilentlyContinue
     New-ItemProperty -Path $RunKey -Name 'WinRestyleT12' `
         -Value "cmd /c echo ran> `"$runMarker`"" -Force | Out-Null
+    if (-not (Test-Path $RunOnceKey)) {
+        New-Item -Path $RunOnceKey -Force | Out-Null
+        $script:CreatedRunOnceKey = $true
+    }
     New-ItemProperty -Path $RunOnceKey -Name 'WinRestyleT12Once' `
         -Value "cmd /c echo ran> `"$onceMarker`"" -Force | Out-Null
     $env:WR_SHELL_TEST_ARGS = '--autostart-test-filter=WinRestyleT12'
@@ -341,6 +348,12 @@ finally {
     # T12 leftovers must never survive into the user's real logon.
     Remove-ItemProperty -Path $RunKey -Name 'WinRestyleT12' -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $RunOnceKey -Name 'WinRestyleT12Once' -ErrorAction SilentlyContinue
+    if ($script:CreatedRunOnceKey -and (Test-Path $RunOnceKey)) {
+        $key = Get-Item $RunOnceKey -ErrorAction SilentlyContinue
+        if ($key -and $key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0) {
+            Remove-Item $RunOnceKey -ErrorAction SilentlyContinue
+        }
+    }
     if ($script:ConfigTouched) {
         if ($script:HadConfig) { Copy-Item $ConfigBak $ConfigFile -Force }
         else {
