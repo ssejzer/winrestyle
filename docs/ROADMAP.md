@@ -43,16 +43,17 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 - [x] Config load from `%APPDATA%\WinRestyle\config.toml` (`wr-core::config`;
       hot reload wired to `ReloadConfig`; unit tests + automated T10 green in
       the VM 2026-07-18).
-- [ ] **Logon autostart** — run what explorer would at shell start so the user's
+- [x] **Logon autostart** — run what explorer would at shell start so the user's
       session isn't degraded: `Run` / `RunOnce` keys (HKCU + HKLM) and the
       per-user + common Startup folders, plus session helpers like `rdpclip.exe`
       (clipboard/redirection in remote/VM sessions). Each entry is enumerable and
       **individually opt-in/out via config**; default mirrors Windows behavior.
       (Scheduled-task "at logon" items are launched by Task Scheduler, not the
       shell, so they still fire — not our responsibility.)
-      **Implemented** (ADR 0004: HKLM RunOnce skipped, once-per-logon-session
-      guard, unswapped-session guard). Check off once automated T12 passes a VM
-      run; the real-logon half gets verified at the next manual T3.
+      Done per ADR 0004 (HKLM RunOnce skipped, once-per-logon-session guard,
+      unswapped-session guard); automated T12 green 2026-07-19. Real-logon
+      half (actual startup apps + no re-run after a crash relaunch) gets
+      verified at the next manual T3.
 
 ## Phase 2 — Taskbar (flagship)
 
