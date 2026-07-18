@@ -1,8 +1,26 @@
-# WinRestyle — Manual Test Protocol (Phase 0)
+# WinRestyle — VM Test Protocol
 
 > **Run everything below inside a disposable Windows 11 VM with snapshots.**
 > A bug here can leave a blank desktop. Take a snapshot named `clean` before
 > you start, and revert to it between runs.
+
+## Automated harness — run this first
+
+Almost everything below is automated. In the VM:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
+```
+
+It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
+T5–T9** against the real binaries (no shell swap, no re-logon needed) and
+prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
+Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
+
+**Still manual, once per release:** **T3** — the real swap + logon + blank
+desktop + `Win + Ctrl + F1` — because it needs a human at the logon screen,
+and the registry-hygiene halves of **T4**. The sections below remain the
+reference for what each test means and for running one by hand when debugging.
 
 ## Prerequisites
 
