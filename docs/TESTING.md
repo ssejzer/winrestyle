@@ -135,10 +135,12 @@ No registry swap needed — run the watchdog directly from a terminal.
 **Snapshot first** if running swapped; also works unswapped from a terminal.
 
 1. Start the watchdog with `--ack-hang-after=20`. After 20 s its pipe server
-   freezes (simulating a wedged watchdog with a dead hotkey).
-2. ✅ Pass if ~5–6 s later the shell logs "watchdog silent … killing hung
-   watchdog", the monitor relaunches a fresh watchdog (new pid, no test flag),
-   the pair converges to one of each, and `Win + Ctrl + F1` works again.
+   freezes (simulating a partially wedged watchdog).
+2. ✅ Pass if ~5–6 s later the frozen watchdog is *replaced*: a fresh watchdog
+   (new pid, no test flag) takes over and the pair converges to one of each
+   with `Win + Ctrl + F1` working. Either mechanism counts (see ADR 0003
+   amendment): the watchdog self-exits ("own pipe thread is wedged", usually
+   first) or the shell kills it ("killing hung watchdog").
 
 ## Resolved Phase 0 question
 

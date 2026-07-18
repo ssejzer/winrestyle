@@ -53,13 +53,46 @@ Phase 0 / ADR 0002 take over unchanged. No second recovery mechanism exists.
   same pipe; `RequestRestore` is wired to the emergency-restore path now, the
   rest are protocol placeholders for Phase 1 config work.
 
+## Amendment: partial hangs inside the watchdog (found by T9, 2026-07-18)
+
+The first automated T9 run exposed a flaw in the design above: the watchdog is
+multi-threaded, and a hang can wedge *some* of its threads. Two failure modes:
+
+1. **Pipe thread hung, supervisor alive.** The supervisor's "shell went
+   silent" signal is produced by the pipe thread — so when that thread is the
+   hung one, the supervisor blamed the shell and killed the innocent party
+   (one second before the shell's own detection would have fired), and the
+   frozen server then blocked the successor shell with `pipe busy`. Observed
+   live in T9.
+2. **Supervisor hung, pipe thread alive** (the shape of the actual Phase 0
+   deadlock). The pipe thread would keep acking, so the shell would see a
+   "healthy" watchdog whose hotkey recovery is dead. Nothing would detect it.
+
+Fix, same principle extended *inside* the watchdog — a thread may only vouch
+for what it can verify:
+
+- The supervisor and pipe threads each maintain a liveness stamp.
+- The supervisor treats stale shell heartbeats as evidence against the shell
+  **only if the pipe thread's stamp is fresh**; if both are stale, the
+  watchdog itself is compromised and **exits** (convert own hang to death —
+  the shell's monitor relaunches a fresh watchdog).
+- The pipe thread **withholds acks while the supervisor's stamp is stale** —
+  an ack vouches for the whole watchdog, so a wedged supervisor must make the
+  watchdog *look* hung to the shell, which then kills and replaces it.
+
+Remaining accepted gap: a hang confined to the main message loop alone (hotkey
+dead, supervision and heartbeats fine). No cheap observer exists for a thread
+whose job is to block in `GetMessageW`; revisit if it ever occurs in practice.
+
 ## Verification (VM)
 
 - **T8 — hung shell:** `wr-shell --hang-heartbeat-after=N` keeps the process
   alive but silent; the watchdog must kill and relaunch it within ~6 s.
 - **T9 — hung watchdog:** `wr-watchdog --ack-hang-after=N` freezes the pipe
-  server; the shell must kill the watchdog, the monitor relaunches it, and
-  the pair converges (sweep) with a working hotkey.
+  server; the watchdog must be replaced by a fresh one and the pair must
+  converge with a working hotkey. Either resolution is a pass: the watchdog
+  self-exits (pipe-wedged check, usually wins the race) or the shell kills it
+  (ack timeout).
 
 ## Consequences
 

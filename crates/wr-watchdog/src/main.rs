@@ -79,6 +79,16 @@ mod win {
         /// it does — a shell that never connects is degraded but alive, and is
         /// never killed for silence (ADR 0003).
         shell_heartbeat: Arc<Mutex<Option<Instant>>>,
+        /// Liveness stamp of the pipe-server thread while a client is
+        /// connected. Stale heartbeats are only evidence against the *shell*
+        /// if the thread recording them is itself alive — otherwise the
+        /// watchdog is the hung one and would kill an innocent shell (found
+        /// the hard way in T9).
+        pipe_alive: Arc<Mutex<Option<Instant>>>,
+        /// Liveness stamp of the supervisor thread. The pipe thread refuses to
+        /// ack heartbeats while this is stale: a wedged supervisor (the Phase 0
+        /// deadlock!) must look *hung* to the shell, not healthy.
+        supervisor_alive: Arc<Mutex<Instant>>,
         /// Main thread id, so background threads can end the message loop.
         main_thread: u32,
     }
@@ -98,6 +108,8 @@ mod win {
             recovered: Arc::new(AtomicBool::new(false)),
             child: Arc::new(Mutex::new(None)),
             shell_heartbeat: Arc::new(Mutex::new(None)),
+            pipe_alive: Arc::new(Mutex::new(None)),
+            supervisor_alive: Arc::new(Mutex::new(Instant::now())),
             main_thread: unsafe { GetCurrentThreadId() },
         };
 
@@ -140,6 +152,7 @@ mod win {
         let mut crashes: Vec<Instant> = Vec::new();
 
         while !g.shutting_down.load(Ordering::SeqCst) {
+            *g.supervisor_alive.lock().unwrap() = Instant::now();
             // ADR 0002 mutual supervision: tell the shell which process to
             // watch. WR_WD_RELAUNCH_STATE (if a shell relaunched us) is passed
             // along implicitly via normal env inheritance.
@@ -174,6 +187,7 @@ mod win {
                     // Recovery is tearing us down and owns killing the child.
                     return;
                 }
+                *g.supervisor_alive.lock().unwrap() = Instant::now();
                 let mut guard = g.child.lock().unwrap();
                 match guard.as_mut() {
                     Some(c) => match c.try_wait() {
@@ -192,6 +206,26 @@ mod win {
                                 .unwrap()
                                 .is_some_and(|t| t.elapsed() > wr_ipc::HEARTBEAT_TIMEOUT);
                             if hung {
+                                // Stale heartbeats only incriminate the shell
+                                // if the pipe thread recording them is alive.
+                                // If that thread is wedged too, *we* are the
+                                // hung process: exit, so the shell's monitor
+                                // relaunches a fresh watchdog (ADR 0003 —
+                                // convert hangs to deaths). Killing the shell
+                                // here would shoot the innocent party and
+                                // leave a wedged watchdog in charge.
+                                let pipe_wedged = g
+                                    .pipe_alive
+                                    .lock()
+                                    .unwrap()
+                                    .is_some_and(|t| t.elapsed() > wr_ipc::HEARTBEAT_TIMEOUT);
+                                if pipe_wedged {
+                                    log::error!(
+                                        "own pipe thread is wedged (heartbeats stale on both \
+                                         sides); exiting so the shell relaunches a fresh watchdog"
+                                    );
+                                    std::process::exit(2);
+                                }
                                 log::error!(
                                     "shell heartbeat silent for >{:?}; killing hung shell",
                                     wr_ipc::HEARTBEAT_TIMEOUT
@@ -296,6 +330,7 @@ mod win {
                 if g.shutting_down.load(Ordering::SeqCst) {
                     return;
                 }
+                *g.pipe_alive.lock().unwrap() = Some(Instant::now());
                 if let Some(after) = ack_hang_after {
                     if started.elapsed() >= after {
                         log::warn!("SIMULATING WATCHDOG HANG: pipe server frozen (test flag)");
@@ -307,6 +342,20 @@ mod win {
                 match server.try_recv::<wr_ipc::ToWatchdog>() {
                     Ok(Some(wr_ipc::ToWatchdog::ShellHeartbeat { seq, pid })) => {
                         *g.shell_heartbeat.lock().unwrap() = Some(Instant::now());
+                        // An ack vouches for the whole watchdog, not just this
+                        // thread. If the supervisor is wedged (the Phase 0
+                        // deadlock shape: hotkey recovery dead, this thread
+                        // fine), withhold acks — to the shell we must look
+                        // hung, so it kills and relaunches us (ADR 0003).
+                        let supervisor_wedged = g.supervisor_alive.lock().unwrap().elapsed()
+                            > wr_ipc::HEARTBEAT_TIMEOUT;
+                        if supervisor_wedged {
+                            log::error!(
+                                "supervisor thread is wedged; withholding acks so the \
+                                 shell treats this watchdog as hung and replaces it"
+                            );
+                            continue;
+                        }
                         let ack = wr_ipc::ToShell::HeartbeatAck {
                             seq,
                             pid: std::process::id(),
@@ -327,8 +376,10 @@ mod win {
             }
 
             // The dead client's last heartbeat must not get its successor
-            // killed for "silence" it never produced.
+            // killed for "silence" it never produced; likewise our own stamp
+            // only means something while a client is connected.
             *g.shell_heartbeat.lock().unwrap() = None;
+            *g.pipe_alive.lock().unwrap() = None;
             server.disconnect();
             log::info!("pipe client disconnected");
         }
