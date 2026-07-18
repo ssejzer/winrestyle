@@ -91,7 +91,10 @@ mod win {
 
         // Main thread: register the emergency hotkey and pump messages.
         register_hotkey().context("registering emergency hotkey")?;
-        log::info!("emergency hotkey registered: {}", wr_core::EMERGENCY_HOTKEY_LABEL);
+        log::info!(
+            "emergency hotkey registered: {}",
+            wr_core::EMERGENCY_HOTKEY_LABEL
+        );
 
         message_loop(&guardian);
 
@@ -226,9 +229,7 @@ mod win {
     /// `wr-shell.exe` is expected to sit next to the watchdog binary.
     fn shell_exe_path() -> Result<PathBuf> {
         let exe = std::env::current_exe()?;
-        let dir = exe
-            .parent()
-            .context("watchdog has no parent directory")?;
+        let dir = exe.parent().context("watchdog has no parent directory")?;
         Ok(dir.join("wr-shell.exe"))
     }
 }

@@ -21,9 +21,14 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let opts = Options::from_args(std::env::args().skip(1));
-    log::info!("wr-shell (Phase 0 dummy) starting; pid {}", std::process::id());
-    log::info!("==> If you see a blank desktop, this is expected. Press {} to restore Windows.",
-        wr_core::EMERGENCY_HOTKEY_LABEL);
+    log::info!(
+        "wr-shell (Phase 0 dummy) starting; pid {}",
+        std::process::id()
+    );
+    log::info!(
+        "==> If you see a blank desktop, this is expected. Press {} to restore Windows.",
+        wr_core::EMERGENCY_HOTKEY_LABEL
+    );
 
     let start = Instant::now();
     let mut ticks: u64 = 0;

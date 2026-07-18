@@ -40,14 +40,22 @@ fn status() -> Result<()> {
 #[cfg(windows)]
 fn apply() -> Result<()> {
     use anyhow::Context;
+    // The registry `Shell` value must point at the *watchdog*, not `wr-shell`
+    // directly: the watchdog owns the `Win + Ctrl + F1` emergency hotkey and
+    // supervises `wr-shell` as its child. Pointing `Shell` at `wr-shell.exe`
+    // would log the user into a blank desktop with no hotkey and no supervisor
+    // running — exactly the brick the safety harness exists to prevent.
     let shell = std::env::current_exe()?
         .parent()
         .context("installer has no parent dir")?
-        .join("wr-shell.exe");
+        .join("wr-watchdog.exe");
     println!("WARNING: this replaces your per-user shell. Run in a VM only.");
     wr_core::shell::backup_and_set_shell(&shell.to_string_lossy())?;
     println!("applied. Log out/in (or reboot) to start the WinRestyle shell.");
-    println!("emergency restore hotkey: {}", wr_core::EMERGENCY_HOTKEY_LABEL);
+    println!(
+        "emergency restore hotkey: {}",
+        wr_core::EMERGENCY_HOTKEY_LABEL
+    );
     Ok(())
 }
 

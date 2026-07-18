@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Fast, cheap gate: format, lint, and type-check both the host and the real
+  # Windows target — all on Linux. `cargo check` type-checks without a linker,
+  # so this catches windows-rs API misuse even though it can't run the code.
+  lint-and-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy (host)
+        run: cargo clippy --workspace --all-targets
+      - name: clippy (windows target)
+        run: cargo clippy --workspace --target x86_64-pc-windows-msvc
+
+  # The real thing: link and build on Windows so we know the binaries actually
+  # come out, not just type-check.
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --workspace --release
+      - name: test
+        run: cargo test --workspace
