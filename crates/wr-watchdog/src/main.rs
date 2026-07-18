@@ -126,13 +126,19 @@ mod win {
         };
 
         // Pipe server: heartbeats from the shell, commands from the installer.
-        // `--ack-hang-after=<secs>` (VM tests only) freezes it to fake a hang.
+        // VM-test-only flags: `--ack-hang-after=<secs>` freezes it to fake a
+        // hang; `--send-reload-every=<secs>` sends the shell `ReloadConfig`
+        // periodically (nothing sends it for real until the Phase 3 installer),
+        // so T10 can exercise the hot-reload path end to end.
         {
             let g = guardian.clone();
             let ack_hang_after = std::env::args()
                 .find_map(|a| a.strip_prefix("--ack-hang-after=")?.parse().ok())
                 .map(Duration::from_secs);
-            std::thread::spawn(move || serve_pipe(&g, ack_hang_after));
+            let send_reload_every = std::env::args()
+                .find_map(|a| a.strip_prefix("--send-reload-every=")?.parse().ok())
+                .map(Duration::from_secs);
+            std::thread::spawn(move || serve_pipe(&g, ack_hang_after, send_reload_every));
         }
 
         // Main thread: register the emergency hotkey and pump messages.
@@ -319,7 +325,11 @@ mod win {
     /// Host the `wr-ipc` pipe: track shell heartbeats (ADR 0003) and serve
     /// commands. Serves one client at a time and survives client churn — every
     /// relaunched shell reconnects to the same server.
-    fn serve_pipe(g: &Guardian, ack_hang_after: Option<Duration>) {
+    fn serve_pipe(
+        g: &Guardian,
+        ack_hang_after: Option<Duration>,
+        send_reload_every: Option<Duration>,
+    ) {
         let mut server = match wr_ipc::pipe::Server::create(wr_core::PIPE_NAME) {
             Ok(s) => s,
             Err(e) => {
@@ -343,11 +353,25 @@ mod win {
             }
             log::info!("pipe client connected");
 
+            // Timer for `--send-reload-every`; per-connection so a freshly
+            // connected shell gets a full interval before its first reload.
+            let mut last_reload = Instant::now();
+
             loop {
                 if g.shutting_down.load(Ordering::SeqCst) {
                     return;
                 }
                 *g.pipe_alive.lock().unwrap() = Some(Instant::now());
+                if let Some(every) = send_reload_every {
+                    if last_reload.elapsed() >= every {
+                        last_reload = Instant::now();
+                        log::info!("sending ReloadConfig to the shell (test flag)");
+                        if let Err(e) = server.send(&wr_ipc::ToShell::ReloadConfig) {
+                            log::warn!("test ReloadConfig send failed: {e:#}");
+                            break;
+                        }
+                    }
+                }
                 if let Some(after) = ack_hang_after {
                     if started.elapsed() >= after {
                         log::warn!("SIMULATING WATCHDOG HANG: pipe server frozen (test flag)");

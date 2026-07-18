@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 ```
 
 It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
-T5–T9** against the real binaries (no shell swap, no re-logon needed) and
+T5–T10** against the real binaries (no shell swap, no re-logon needed) and
 prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
 Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
 
@@ -141,6 +141,23 @@ No registry swap needed — run the watchdog directly from a terminal.
    with `Win + Ctrl + F1` working. Either mechanism counts (see ADR 0003
    amendment): the watchdog self-exits ("own pipe thread is wedged", usually
    first) or the shell kills it ("killing hung watchdog").
+
+## T10 — Config loads at startup and hot-reloads over IPC  (Phase 1)
+
+No registry swap needed — run the watchdog directly from a terminal.
+
+1. Write `%APPDATA%\WinRestyle\config.toml` with a recognizable value, e.g.
+   `[wallpaper]` / `color = "#112233"`. **The harness backs up and restores
+   your real config byte-identically; do the same by hand.**
+2. Start the watchdog with `--send-reload-every=3` (test flag: sends the shell
+   `ReloadConfig` every 3 s — nothing sends it for real until the Phase 3
+   installer).
+3. ✅ Pass if the shell logs `config: wallpaper color #112233` at startup.
+4. Change the file's color to `#445566`. ✅ Pass if within a few seconds the
+   shell logs `ReloadConfig received` and `config now: wallpaper color #445566`.
+5. Resilience (covered by unit tests, worth eyeballing once): a *broken* file
+   at startup logs an error and the shell still starts with defaults; a broken
+   file at reload keeps the previous good config.
 
 ## Resolved Phase 0 question
 

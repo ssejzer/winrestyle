@@ -37,8 +37,10 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       2026-07-18.)
 - [x] Automated VM test harness (`scripts\vm-test.ps1`): T0–T2, T5–T9 run
       hands-off against release binaries; only T3 stays manual.
-- [ ] Config load from `%APPDATA%\WinRestyle\config.toml`. **← next up**
-      (wire to the `ReloadConfig` IPC message, which is already plumbed).
+- [ ] Config load from `%APPDATA%\WinRestyle\config.toml` — **implemented**
+      (`wr-core::config`, hot reload wired to `ReloadConfig`; unit tests green
+      in the VM 2026-07-18). Check off once the new automated T10 passes a
+      VM run.
 - [ ] **Logon autostart** — run what explorer would at shell start so the user's
       session isn't degraded: `Run` / `RunOnce` keys (HKCU + HKLM) and the
       per-user + common Startup folders, plus session helpers like `rdpclip.exe`

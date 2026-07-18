@@ -138,7 +138,12 @@ only detects; it never recovers.
 ## Configuration
 
 User config lives in TOML under `%APPDATA%\WinRestyle\config.toml`, deserialized
-via serde into `wr-core` types. File-watching enables live preview / hot reload.
+via serde into `wr-core` types (`wr_core::config`). Loading can never take the
+shell down: a missing file means defaults, a broken file at startup means
+defaults plus a logged error, and a broken file at *reload* keeps the previous
+good config. Hot reload is driven by the `ReloadConfig` IPC message (sent by the
+installer once it exists; the watchdog's `--send-reload-every` test flag until
+then). File-watching for live preview may come later.
 
 ## Open questions (tracked, not yet decided)
 

@@ -5,8 +5,9 @@
 
 .DESCRIPTION
   Automates docs/TESTING.md: T0 (registry round-trip), T1/T2 (shell crash /
-  crash-loop), T5/T6/T7 (watchdog kill / convergence / runaway cap), and
-  T8/T9 (hung shell / hung watchdog via the ADR 0003 heartbeat).
+  crash-loop), T5/T6/T7 (watchdog kill / convergence / runaway cap),
+  T8/T9 (hung shell / hung watchdog via the ADR 0003 heartbeat), and
+  T10 (config load + hot reload over IPC).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
   desktop + Win+Ctrl+F1) and the logged-in halves of T4.
@@ -41,6 +42,13 @@ $Installer   = Join-Path $Bin 'wr-installer.exe'
 $LogDir      = Join-Path $RepoRoot 'target\vm-test-logs'
 $WinlogonKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon'
 $BackupKey   = 'HKCU:\Software\WinRestyle'
+$ConfigFile  = Join-Path $env:APPDATA 'WinRestyle\config.toml'
+$ConfigBak   = Join-Path $LogDir 'config.toml.bak'
+
+# T10 overwrites the user's real config.toml; these drive the byte-identical
+# restore in the finally block even if the test dies halfway.
+$script:ConfigTouched = $false
+$script:HadConfig     = $false
 
 $script:Results = @()
 
@@ -263,9 +271,39 @@ try {
     Record 'T9 hung watchdog is killed and relaunched' ($relaunched -and $converged) `
         "relaunched=$relaunched converged=$converged froze=$froze killedLogged=$killed" -LogFile $wd.Log
     Reset-TestEnv
+
+    # ---- T10: config load + hot reload over IPC ----------------------------
+    Write-Section 'T10: config loads at startup and hot-reloads over IPC'
+    $script:HadConfig = Test-Path $ConfigFile
+    if ($script:HadConfig) { Copy-Item $ConfigFile $ConfigBak -Force }
+    $script:ConfigTouched = $true
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ConfigFile) | Out-Null
+    Set-Content $ConfigFile "[wallpaper]`ncolor = `"#112233`""
+    # The flag makes the watchdog send ReloadConfig every 3s (nothing sends it
+    # for real until the Phase 3 installer), so the rewrite below is picked up
+    # no matter when it lands relative to the message.
+    $wd = Start-Watchdog -Arguments @('--send-reload-every=3') -LogName 't10'
+    $loaded = Wait-Until { (Get-Log $wd.Log) -match 'config: wallpaper color #112233' } 25
+    Set-Content $ConfigFile "[wallpaper]`ncolor = `"#445566`""
+    $reloaded = Wait-Until { (Get-Log $wd.Log) -match 'config now: wallpaper color #445566' } 20
+    Record 'T10 config.toml loaded at shell startup' $loaded -LogFile $wd.Log
+    Record 'T10 ReloadConfig hot-swaps the config over the pipe' $reloaded -LogFile $wd.Log
+    Reset-TestEnv
 }
 finally {
     Reset-TestEnv
+    if ($script:ConfigTouched) {
+        if ($script:HadConfig) { Copy-Item $ConfigBak $ConfigFile -Force }
+        else {
+            Remove-Item $ConfigFile -ErrorAction SilentlyContinue
+            # Drop the WinRestyle dir too if T10 created it and nothing else
+            # lives there.
+            $cfgDir = Split-Path -Parent $ConfigFile
+            if ((Test-Path $cfgDir) -and -not (Get-ChildItem $cfgDir -Force)) {
+                Remove-Item $cfgDir -ErrorAction SilentlyContinue
+            }
+        }
+    }
     if (Test-Path $BackupKey) {
         Write-Warning 'WinRestyle registry backup still present - restoring'
         & $Installer restore
