@@ -9,6 +9,12 @@
 //! 3. Detects a crash-loop (too many exits too fast) and falls back to
 //!    `explorer.exe` instead of relaunching forever.
 //!
+//! The watchdog's *own* crash recovery is Winlogon's `AutoRestartShell`
+//! mechanism (we are the registered shell). See ADR 0001
+//! (`docs/decisions/0001-watchdog-liveness.md`): on startup we warn if that
+//! mechanism is disabled and kill any stray `wr-shell` a previous watchdog
+//! instance left behind.
+//!
 //! ## Phase 0 status
 //!
 //! This is the make-or-break spike. The exact mechanism for restoring the
@@ -36,7 +42,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(windows)]
 mod win {
     use anyhow::{Context, Result};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -75,6 +81,16 @@ mod win {
     pub fn run() -> Result<()> {
         let shell_exe = shell_exe_path().context("locating wr-shell.exe")?;
         log::info!("watchdog starting; shell = {}", shell_exe.display());
+
+        // ADR 0001: our own crash recovery is Winlogon's `AutoRestartShell`
+        // (we are the registered shell, so Winlogon relaunches us). We never
+        // write HKLM — only read it to warn loudly when that safety net is off.
+        check_auto_restart_shell();
+
+        // ADR 0001: if Winlogon just relaunched us after a crash, our previous
+        // wr-shell child is still running (Windows does not kill orphans).
+        // Spawning another would give the user two desktops — sweep first.
+        kill_stray_shells(&shell_exe);
 
         let guardian = Guardian {
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -206,6 +222,83 @@ mod win {
         match Command::new("explorer.exe").spawn() {
             Ok(_) => log::info!("launched explorer.exe"),
             Err(e) => log::error!("failed to launch explorer.exe: {e}"),
+        }
+    }
+
+    /// Warn (loudly) if Winlogon's shell auto-restart is disabled, since that
+    /// is the only thing that recovers a *watchdog* crash.
+    fn check_auto_restart_shell() {
+        match wr_core::shell::read_auto_restart_shell() {
+            // Absent means default, and the default is enabled.
+            Ok(Some(1)) | Ok(None) => {
+                log::info!("AutoRestartShell is on: Winlogon relaunches us if we crash");
+            }
+            Ok(Some(v)) => {
+                log::error!(
+                    "AutoRestartShell = {v} (expected 1): if the watchdog crashes, \
+                     Winlogon will NOT relaunch it — no emergency hotkey, no shell \
+                     supervision. Re-enable it (HKLM Winlogon\\AutoRestartShell = 1) \
+                     before relying on WinRestyle. We never change HKLM ourselves."
+                );
+            }
+            Err(e) => log::warn!("could not read AutoRestartShell: {e:#}"),
+        }
+    }
+
+    /// Kill any `wr-shell.exe` left over from a previous watchdog instance.
+    /// Runs once at startup, before we spawn our own child.
+    fn kill_stray_shells(shell_exe: &Path) {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+
+        let target = match shell_exe.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_ascii_lowercase(),
+            None => return,
+        };
+
+        let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("stray-shell sweep skipped: process snapshot failed: {e}");
+                return;
+            }
+        };
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+        while more {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
+            if name == target {
+                let pid = entry.th32ProcessID;
+                log::warn!("killing stray {target} (pid {pid}) from a previous watchdog");
+                match unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) } {
+                    Ok(process) => unsafe {
+                        if let Err(e) = TerminateProcess(process, 1) {
+                            log::error!("failed to kill stray pid {pid}: {e}");
+                        }
+                        let _ = CloseHandle(process);
+                    },
+                    Err(e) => log::error!("failed to open stray pid {pid}: {e}"),
+                }
+            }
+            more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+        }
+        unsafe {
+            let _ = CloseHandle(snapshot);
         }
     }
 

@@ -59,8 +59,46 @@ This is the real shell-swap test. **Snapshot first.**
 2. ✅ Pass if `HKCU Shell` matches the `clean` snapshot and the `HKCU\Software\
    WinRestyle` backup key is gone.
 
-## Open question being resolved in Phase 0
+## T5 — Winlogon relaunches a killed watchdog  ⭐ validates ADR 0001
 
-How exactly does the watchdog get launched as/with the shell, and does launching
-`explorer.exe` mid-session reliably re-adopt the shell role? T3 is the
-experiment that answers this. Record findings in `docs/ARCHITECTURE.md`.
+The watchdog's own crash recovery is Winlogon's `AutoRestartShell` (HKLM,
+default `1`) — see `docs/decisions/0001-watchdog-liveness.md`. This test
+confirms that assumption. **Snapshot first.**
+
+1. `wr-installer apply`, log out and back in (the watchdog is now the running
+   shell, as in T3). Note the `wr-watchdog.exe` pid in Task Manager.
+2. Kill `wr-watchdog.exe` from Task Manager (simulates a watchdog crash).
+3. ✅ Pass if Winlogon relaunches the watchdog (new pid appears within a few
+   seconds, and its log shows the startup banner again) **and** the
+   `Win + Ctrl + F1` hotkey still restores the desktop afterwards.
+4. ❌ If nothing relaunches, ADR 0001's "no second guardian" decision must be
+   revisited before Phase 1.
+
+## T6 — No duplicate desktop after a watchdog restart
+
+Run immediately after T5 step 3 (before pressing the hotkey).
+
+1. In Task Manager, count `wr-shell.exe` processes.
+2. ✅ Pass if exactly **one** `wr-shell.exe` is running — the relaunched
+   watchdog must have killed the orphaned child from the old instance (its log
+   shows a "killing stray wr-shell.exe" line) before spawning its own.
+
+## T7 — Rapid watchdog restart (Winlogon throttling)
+
+Determines whether Winlogon throttles or gives up when the shell keeps dying.
+
+1. From T5's end state, kill the relaunched `wr-watchdog.exe` again as soon as
+   it appears; repeat ~5–10 times in quick succession.
+2. Record: does Winlogon keep relaunching indefinitely, or stop after N
+   attempts / start delaying? There is no fixed pass criterion — the goal is
+   data. Write the observed behavior into ADR 0001.
+3. Finish with `Win + Ctrl + F1` (if a watchdog is alive) or a manual
+   `wr-installer restore` + re-logon, then revert the snapshot.
+
+## Resolved Phase 0 question
+
+How the watchdog is launched as the shell, and whether `explorer.exe` re-adopts
+the shell role mid-session: **resolved 2026-07-18** — the watchdog *is* the
+registered shell, and mid-session restore works (T0–T4 pass). Findings recorded
+in `docs/ARCHITECTURE.md`; liveness follow-up in
+`docs/decisions/0001-watchdog-liveness.md`.

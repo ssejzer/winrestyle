@@ -108,6 +108,23 @@ mod imp {
         Ok(())
     }
 
+    /// Winlogon's `AutoRestartShell` value (HKLM, default `1`): when `1`,
+    /// Winlogon relaunches the registered shell whenever it terminates. Our
+    /// watchdog-crash recovery relies on it (see ADR 0001). Read-only — we
+    /// never write HKLM. `None` means the value is absent (Windows treats the
+    /// default as enabled).
+    pub fn read_auto_restart_shell() -> Result<Option<u32>> {
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let winlogon = hklm
+            .open_subkey(WINLOGON)
+            .context("opening HKLM Winlogon key")?;
+        match winlogon.get_value::<u32, _>("AutoRestartShell") {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).context("reading HKLM AutoRestartShell value"),
+        }
+    }
+
     /// Restore the per-user shell to exactly what it was before WinRestyle, and
     /// clear our backup. Safe to call when nothing is applied.
     pub fn restore_shell() -> Result<RestoreOutcome> {
@@ -170,6 +187,11 @@ mod imp {
     pub fn restore_shell() -> Result<RestoreOutcome> {
         bail!(MSG)
     }
+    pub fn read_auto_restart_shell() -> Result<Option<u32>> {
+        bail!(MSG)
+    }
 }
 
-pub use imp::{backup_and_set_shell, has_backup, read_user_shell, restore_shell};
+pub use imp::{
+    backup_and_set_shell, has_backup, read_auto_restart_shell, read_user_shell, restore_shell,
+};
