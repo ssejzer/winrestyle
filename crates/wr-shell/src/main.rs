@@ -21,7 +21,10 @@
 //! With a small `--crash-after`, the watchdog should relaunch us a few times
 //! and then fall back to explorer.exe — that is the behavior we want to verify.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use wr_core::config::ConfigStore;
 
 // `ticks % 10 == 0` reads fine; `.is_multiple_of()` would raise our MSRV (1.77).
 #[allow(clippy::manual_is_multiple_of)]
@@ -41,6 +44,12 @@ fn main() {
         std::process::id()
     );
 
+    // Config can never block startup: missing/broken files load as defaults.
+    // The store is shared with the IPC thread, which swaps it on ReloadConfig;
+    // upcoming consumers (wallpaper, autostart) read via `config.get()`.
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    let config = Arc::new(ConfigStore::load_default());
+
     // ADR 0002 mutual supervision: watch the watchdog and relaunch it if it
     // dies (Winlogon won't — AutoRestartShell ignores custom per-user shells).
     #[cfg(windows)]
@@ -48,7 +57,7 @@ fn main() {
 
     // ADR 0003: heartbeat over the pipe so a *hung* watchdog is detected too.
     #[cfg(windows)]
-    guardian::start_heartbeat(opts.hang_heartbeat_after);
+    guardian::start_heartbeat(opts.hang_heartbeat_after, config);
     log::info!(
         "==> If you see a blank desktop, this is expected. Press {} to restore Windows.",
         wr_core::EMERGENCY_HOTKEY_LABEL
@@ -83,6 +92,7 @@ fn main() {
 #[cfg(windows)]
 mod guardian {
     use std::process::Command;
+    use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use windows::Win32::Foundation::CloseHandle;
@@ -91,6 +101,7 @@ mod guardian {
         PROCESS_TERMINATE,
     };
 
+    use wr_core::config::ConfigStore;
     use wr_core::guardian::{RelaunchState, RELAUNCH_STATE_ENV, WATCHDOG_PID_ENV};
 
     /// Start the monitor thread. No-op (with a log line) when we were not
@@ -193,11 +204,11 @@ mod guardian {
     /// watchdog is hung — kill it; the [`monitor`] thread then relaunches it
     /// through the ordinary death path. `hang_after` is a test hook that stops
     /// heartbeating (while staying alive) to simulate a hung *shell*.
-    pub fn start_heartbeat(hang_after: Option<Duration>) {
-        std::thread::spawn(move || heartbeat_loop(hang_after));
+    pub fn start_heartbeat(hang_after: Option<Duration>, config: Arc<ConfigStore>) {
+        std::thread::spawn(move || heartbeat_loop(hang_after, config));
     }
 
-    fn heartbeat_loop(hang_after: Option<Duration>) {
+    fn heartbeat_loop(hang_after: Option<Duration>, config: Arc<ConfigStore>) {
         let started = Instant::now();
         let mut logged_unavailable = false;
         loop {
@@ -253,7 +264,10 @@ mod guardian {
                             std::process::exit(0);
                         }
                         Ok(Some(wr_ipc::ToShell::ReloadConfig)) => {
-                            log::info!("ReloadConfig received (no config yet — Phase 1)");
+                            log::info!("ReloadConfig received");
+                            // Swaps the store (and logs the outcome); consumers
+                            // pick the new values up on their next `get()`.
+                            config.reload();
                         }
                         Ok(None) => std::thread::sleep(Duration::from_millis(200)),
                         Err(_) => {

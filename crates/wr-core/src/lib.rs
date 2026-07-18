@@ -4,6 +4,7 @@
 //! The single most important invariant in this whole project: **we must always
 //! be able to put `explorer.exe` back.** That logic lives in [`shell`].
 
+pub mod config;
 pub mod guardian;
 pub mod shell;
 
