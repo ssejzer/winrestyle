@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 ```
 
 It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
-T5–T10** against the real binaries (no shell swap, no re-logon needed) and
+T5–T11** against the real binaries (no shell swap, no re-logon needed) and
 prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
 Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
 
@@ -158,6 +158,20 @@ No registry swap needed — run the watchdog directly from a terminal.
 5. Resilience (covered by unit tests, worth eyeballing once): a *broken* file
    at startup logs an error and the shell still starts with defaults; a broken
    file at reload keeps the previous good config.
+
+## T11 — Wallpaper paints and hot-repaints  (Phase 1)
+
+Same setup as T10 (the harness runs them as one scenario).
+
+1. ✅ Pass if the shell logs `wallpaper window up (…)` and
+   `wallpaper painted: color #112233` shortly after startup.
+2. After changing the config color (T10 step 4), ✅ pass if it logs
+   `wallpaper painted: color #445566`.
+3. **Automated caveat:** unswapped (explorer still running), the wallpaper
+   window sits *behind* explorer's desktop, so the harness verifies paint
+   events via logs, not pixels. The visual check — wallpaper actually visible,
+   image file rendering, fallback color on a broken image path — happens
+   during the manual T3 release pass.
 
 ## Resolved Phase 0 question
 

@@ -7,7 +7,7 @@
   Automates docs/TESTING.md: T0 (registry round-trip), T1/T2 (shell crash /
   crash-loop), T5/T6/T7 (watchdog kill / convergence / runaway cap),
   T8/T9 (hung shell / hung watchdog via the ADR 0003 heartbeat), and
-  T10 (config load + hot reload over IPC).
+  T10/T11 (config load + hot reload over IPC; wallpaper paint + repaint).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
   desktop + Win+Ctrl+F1) and the logged-in halves of T4.
@@ -179,7 +179,7 @@ try {
     Record 'T1 crashed shell is relaunched' $ok -LogFile $wd.Log
     # T7/T9 assert on wr-shell (grandchild) log lines; prove they reach the
     # capture file at all, so a plumbing failure there isn't misread as a bug.
-    $shellVisible = (Get-Log $wd.Log) -match 'wr-shell \(Phase 0 dummy\) starting'
+    $shellVisible = (Get-Log $wd.Log) -match 'wr-shell \(Phase 1 minimal\) starting'
     Record 'T1b shell (grandchild) logs reach the capture file' $shellVisible -LogFile $wd.Log
     Reset-TestEnv
 
@@ -272,8 +272,8 @@ try {
         "relaunched=$relaunched converged=$converged froze=$froze killedLogged=$killed" -LogFile $wd.Log
     Reset-TestEnv
 
-    # ---- T10: config load + hot reload over IPC ----------------------------
-    Write-Section 'T10: config loads at startup and hot-reloads over IPC'
+    # ---- T10/T11: config load + hot reload + wallpaper ---------------------
+    Write-Section 'T10/T11: config load + hot reload; wallpaper paints and repaints'
     $script:HadConfig = Test-Path $ConfigFile
     if ($script:HadConfig) { Copy-Item $ConfigFile $ConfigBak -Force }
     $script:ConfigTouched = $true
@@ -284,10 +284,14 @@ try {
     # no matter when it lands relative to the message.
     $wd = Start-Watchdog -Arguments @('--send-reload-every=3') -LogName 't10'
     $loaded = Wait-Until { (Get-Log $wd.Log) -match 'config: wallpaper color #112233' } 25
+    $painted = Wait-Until { (Get-Log $wd.Log) -match 'wallpaper painted: color #112233' } 15
     Set-Content $ConfigFile "[wallpaper]`ncolor = `"#445566`""
     $reloaded = Wait-Until { (Get-Log $wd.Log) -match 'config now: wallpaper color #445566' } 20
+    $repainted = Wait-Until { (Get-Log $wd.Log) -match 'wallpaper painted: color #445566' } 15
     Record 'T10 config.toml loaded at shell startup' $loaded -LogFile $wd.Log
     Record 'T10 ReloadConfig hot-swaps the config over the pipe' $reloaded -LogFile $wd.Log
+    Record 'T11 wallpaper paints the configured color at startup' $painted -LogFile $wd.Log
+    Record 'T11 wallpaper repaints after a hot reload' $repainted -LogFile $wd.Log
     Reset-TestEnv
 }
 finally {

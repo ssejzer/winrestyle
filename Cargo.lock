@@ -621,6 +621,7 @@ dependencies = [
 name = "wr-shell"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "env_logger",
  "log",
  "windows",

@@ -1,10 +1,10 @@
 //! WinRestyle shell host.
 //!
-//! ## Phase 0 status: deliberately a dummy.
+//! ## Phase 1 status: minimal shell.
 //!
-//! Right now this is a throwaway "I am the shell" process used only to exercise
-//! the watchdog (relaunch, crash-loop fallback, emergency hotkey). It does NOT
-//! paint a desktop or host a taskbar yet — that arrives in Phase 1/2.
+//! Paints the desktop wallpaper (config-driven, hot-reloadable — see
+//! [`wallpaper`]) and carries the Phase 0 safety harness (mutual supervision,
+//! heartbeats). No taskbar yet — that arrives in Phase 2.
 //!
 //! Test helpers (args):
 //!   --crash-after=<secs>           panic after N seconds (to test relaunch/crash-loop)
@@ -26,6 +26,9 @@ use std::time::{Duration, Instant};
 
 use wr_core::config::ConfigStore;
 
+#[cfg(windows)]
+mod wallpaper;
+
 // `ticks % 10 == 0` reads fine; `.is_multiple_of()` would raise our MSRV (1.77).
 #[allow(clippy::manual_is_multiple_of)]
 fn main() {
@@ -40,15 +43,20 @@ fn main() {
             .chain(std::env::args().skip(1)),
     );
     log::info!(
-        "wr-shell (Phase 0 dummy) starting; pid {}",
+        "wr-shell (Phase 1 minimal) starting; pid {}",
         std::process::id()
     );
 
     // Config can never block startup: missing/broken files load as defaults.
     // The store is shared with the IPC thread, which swaps it on ReloadConfig;
-    // upcoming consumers (wallpaper, autostart) read via `config.get()`.
+    // consumers (the wallpaper, later autostart) read via `config.get()`.
     #[cfg_attr(not(windows), allow(unused_variables))]
     let config = Arc::new(ConfigStore::load_default());
+
+    // The wallpaper thread is cosmetic — it can fail without touching the
+    // safety harness below.
+    #[cfg(windows)]
+    wallpaper::start(Arc::clone(&config));
 
     // ADR 0002 mutual supervision: watch the watchdog and relaunch it if it
     // dies (Winlogon won't — AutoRestartShell ignores custom per-user shells).
@@ -265,9 +273,10 @@ mod guardian {
                         }
                         Ok(Some(wr_ipc::ToShell::ReloadConfig)) => {
                             log::info!("ReloadConfig received");
-                            // Swaps the store (and logs the outcome); consumers
-                            // pick the new values up on their next `get()`.
+                            // Swaps the store (and logs the outcome), then
+                            // nudges the wallpaper to repaint.
                             config.reload();
+                            crate::wallpaper::notify_config_changed();
                         }
                         Ok(None) => std::thread::sleep(Duration::from_millis(200)),
                         Err(_) => {

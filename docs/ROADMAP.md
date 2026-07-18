@@ -27,7 +27,10 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 
 ## Phase 1 — Minimal shell ⭐ (current)
 
-- [ ] `wr-shell` paints desktop background / wallpaper.
+- [ ] `wr-shell` paints desktop background / wallpaper — **implemented**
+      (bottom-most virtual-screen window, config color + optional WIC image,
+      repaint on `ReloadConfig`). Check off once automated T11 passes a VM run
+      and the visual half is eyeballed at the next manual T3.
 - [ ] `wr-shell` spawns and supervises child surfaces (the taskbar).
 - [x] `wr-ipc` named-pipe protocol wired across watchdog ⇄ shell (installer
       client lands with the Phase 3 UI; `RequestRestore` is already served).
@@ -37,10 +40,9 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       2026-07-18.)
 - [x] Automated VM test harness (`scripts\vm-test.ps1`): T0–T2, T5–T9 run
       hands-off against release binaries; only T3 stays manual.
-- [ ] Config load from `%APPDATA%\WinRestyle\config.toml` — **implemented**
-      (`wr-core::config`, hot reload wired to `ReloadConfig`; unit tests green
-      in the VM 2026-07-18). Check off once the new automated T10 passes a
-      VM run.
+- [x] Config load from `%APPDATA%\WinRestyle\config.toml` (`wr-core::config`;
+      hot reload wired to `ReloadConfig`; unit tests + automated T10 green in
+      the VM 2026-07-18).
 - [ ] **Logon autostart** — run what explorer would at shell start so the user's
       session isn't degraded: `Run` / `RunOnce` keys (HKCU + HKLM) and the
       per-user + common Startup folders, plus session helpers like `rdpclip.exe`
