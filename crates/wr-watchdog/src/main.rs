@@ -75,6 +75,10 @@ mod win {
         recovered: Arc<AtomicBool>,
         /// The currently running shell child, so the hotkey path can kill it.
         child: Arc<Mutex<Option<Child>>>,
+        /// When the current shell last heartbeated over the pipe. `None` until
+        /// it does — a shell that never connects is degraded but alive, and is
+        /// never killed for silence (ADR 0003).
+        shell_heartbeat: Arc<Mutex<Option<Instant>>>,
         /// Main thread id, so background threads can end the message loop.
         main_thread: u32,
     }
@@ -93,6 +97,7 @@ mod win {
             shutting_down: Arc::new(AtomicBool::new(false)),
             recovered: Arc::new(AtomicBool::new(false)),
             child: Arc::new(Mutex::new(None)),
+            shell_heartbeat: Arc::new(Mutex::new(None)),
             main_thread: unsafe { GetCurrentThreadId() },
         };
 
@@ -101,6 +106,16 @@ mod win {
             let g = guardian.clone();
             std::thread::spawn(move || supervise_shell(&g, &shell_exe))
         };
+
+        // Pipe server: heartbeats from the shell, commands from the installer.
+        // `--ack-hang-after=<secs>` (VM tests only) freezes it to fake a hang.
+        {
+            let g = guardian.clone();
+            let ack_hang_after = std::env::args()
+                .find_map(|a| a.strip_prefix("--ack-hang-after=")?.parse().ok())
+                .map(Duration::from_secs);
+            std::thread::spawn(move || serve_pipe(&g, ack_hang_after));
+        }
 
         // Main thread: register the emergency hotkey and pump messages.
         register_hotkey().context("registering emergency hotkey")?;
@@ -144,6 +159,8 @@ mod win {
                 }
             };
             log::info!("shell launched (pid {})", child.id());
+            // A fresh shell starts with a clean heartbeat slate.
+            *g.shell_heartbeat.lock().unwrap() = None;
             *g.child.lock().unwrap() = Some(child);
 
             // Wait for the shell to exit WITHOUT holding the lock across the
@@ -165,6 +182,23 @@ mod win {
                             break status;
                         }
                         Ok(None) => {
+                            // Alive — but is it *responsive*? A shell that
+                            // heartbeated before and has now gone silent is
+                            // hung; kill it and let the normal exit path
+                            // (relaunch + crash-loop accounting) take over.
+                            let hung = g
+                                .shell_heartbeat
+                                .lock()
+                                .unwrap()
+                                .is_some_and(|t| t.elapsed() > wr_ipc::HEARTBEAT_TIMEOUT);
+                            if hung {
+                                log::error!(
+                                    "shell heartbeat silent for >{:?}; killing hung shell",
+                                    wr_ipc::HEARTBEAT_TIMEOUT
+                                );
+                                *g.shell_heartbeat.lock().unwrap() = None;
+                                let _ = c.kill();
+                            }
                             drop(guard); // release before sleeping
                             std::thread::sleep(Duration::from_millis(200));
                         }
@@ -228,6 +262,75 @@ mod win {
         match Command::new("explorer.exe").spawn() {
             Ok(_) => log::info!("launched explorer.exe"),
             Err(e) => log::error!("failed to launch explorer.exe: {e}"),
+        }
+    }
+
+    /// Host the `wr-ipc` pipe: track shell heartbeats (ADR 0003) and serve
+    /// commands. Serves one client at a time and survives client churn — every
+    /// relaunched shell reconnects to the same server.
+    fn serve_pipe(g: &Guardian, ack_hang_after: Option<Duration>) {
+        let mut server = match wr_ipc::pipe::Server::create(wr_core::PIPE_NAME) {
+            Ok(s) => s,
+            Err(e) => {
+                // Heartbeats are an upgrade, not a requirement: without the
+                // pipe we degrade to Phase 0 behavior (death-only detection).
+                log::error!("pipe server failed; hang detection disabled: {e:#}");
+                return;
+            }
+        };
+        log::info!("pipe server up at {}", wr_core::PIPE_NAME);
+        let started = Instant::now();
+
+        loop {
+            if g.shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Err(e) = server.wait_for_client() {
+                log::warn!("pipe accept failed: {e:#}");
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            log::info!("pipe client connected");
+
+            loop {
+                if g.shutting_down.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(after) = ack_hang_after {
+                    if started.elapsed() >= after {
+                        log::warn!("SIMULATING WATCHDOG HANG: pipe server frozen (test flag)");
+                        loop {
+                            std::thread::sleep(Duration::from_secs(60));
+                        }
+                    }
+                }
+                match server.try_recv::<wr_ipc::ToWatchdog>() {
+                    Ok(Some(wr_ipc::ToWatchdog::ShellHeartbeat { seq, pid })) => {
+                        *g.shell_heartbeat.lock().unwrap() = Some(Instant::now());
+                        let ack = wr_ipc::ToShell::HeartbeatAck {
+                            seq,
+                            pid: std::process::id(),
+                        };
+                        if let Err(e) = server.send(&ack) {
+                            log::warn!("heartbeat ack to pid {pid} failed: {e:#}");
+                            break;
+                        }
+                    }
+                    Ok(Some(wr_ipc::ToWatchdog::RequestRestore)) => {
+                        recover(g, "restore requested over IPC");
+                        end_main_loop(g);
+                        return;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+                    Err(_) => break, // client gone
+                }
+            }
+
+            // The dead client's last heartbeat must not get its successor
+            // killed for "silence" it never produced.
+            *g.shell_heartbeat.lock().unwrap() = None;
+            server.disconnect();
+            log::info!("pipe client disconnected");
         }
     }
 

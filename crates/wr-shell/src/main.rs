@@ -7,8 +7,16 @@
 //! paint a desktop or host a taskbar yet — that arrives in Phase 1/2.
 //!
 //! Test helpers (args):
-//!   --crash-after=<secs>   panic after N seconds (to test relaunch/crash-loop)
-//!   --exit-after=<secs>    exit cleanly after N seconds
+//!   --crash-after=<secs>           panic after N seconds (to test relaunch/crash-loop)
+//!   --exit-after=<secs>            exit cleanly after N seconds
+//!   --hang-heartbeat-after=<secs>  stop heartbeating after N seconds while
+//!                                  staying alive (simulates a hung shell; the
+//!                                  watchdog should kill and relaunch us)
+//!
+//! The same flags are also read from the `WR_SHELL_TEST_ARGS` env var
+//! (whitespace-separated), so tests can reach a shell the *watchdog* spawns:
+//! `set WR_SHELL_TEST_ARGS=--hang-heartbeat-after=10` before running the
+//! watchdog. Real CLI args win over env args.
 //!
 //! With a small `--crash-after`, the watchdog should relaunch us a few times
 //! and then fall back to explorer.exe — that is the behavior we want to verify.
@@ -20,7 +28,14 @@ use std::time::{Duration, Instant};
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let opts = Options::from_args(std::env::args().skip(1));
+    // Env-var test args first, real CLI args second, so the CLI wins.
+    let env_args = std::env::var("WR_SHELL_TEST_ARGS").unwrap_or_default();
+    let opts = Options::from_args(
+        env_args
+            .split_whitespace()
+            .map(String::from)
+            .chain(std::env::args().skip(1)),
+    );
     log::info!(
         "wr-shell (Phase 0 dummy) starting; pid {}",
         std::process::id()
@@ -30,6 +45,10 @@ fn main() {
     // dies (Winlogon won't — AutoRestartShell ignores custom per-user shells).
     #[cfg(windows)]
     guardian::watch_watchdog();
+
+    // ADR 0003: heartbeat over the pipe so a *hung* watchdog is detected too.
+    #[cfg(windows)]
+    guardian::start_heartbeat(opts.hang_heartbeat_after);
     log::info!(
         "==> If you see a blank desktop, this is expected. Press {} to restore Windows.",
         wr_core::EMERGENCY_HOTKEY_LABEL
@@ -64,11 +83,12 @@ fn main() {
 #[cfg(windows)]
 mod guardian {
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
+        OpenProcess, TerminateProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
+        PROCESS_TERMINATE,
     };
 
     use wr_core::guardian::{RelaunchState, RELAUNCH_STATE_ENV, WATCHDOG_PID_ENV};
@@ -145,6 +165,119 @@ mod guardian {
         }
     }
 
+    /// Start the ADR 0003 heartbeat thread: send `ShellHeartbeat` every
+    /// [`wr_ipc::HEARTBEAT_INTERVAL`] and expect acks. An ack-silent-but-alive
+    /// watchdog is hung — kill it; the [`monitor`] thread then relaunches it
+    /// through the ordinary death path. `hang_after` is a test hook that stops
+    /// heartbeating (while staying alive) to simulate a hung *shell*.
+    pub fn start_heartbeat(hang_after: Option<Duration>) {
+        std::thread::spawn(move || heartbeat_loop(hang_after));
+    }
+
+    fn heartbeat_loop(hang_after: Option<Duration>) {
+        let started = Instant::now();
+        let mut logged_unavailable = false;
+        loop {
+            let mut conn = match wr_ipc::pipe::Connection::connect(wr_core::PIPE_NAME) {
+                Ok(c) => c,
+                Err(e) => {
+                    if !logged_unavailable {
+                        log::info!("watchdog pipe not available (running solo?): {e:#}");
+                        logged_unavailable = true;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+            };
+            logged_unavailable = false;
+            log::info!("connected to watchdog pipe");
+
+            let mut seq: u64 = 0;
+            let mut last_ack = Instant::now();
+            let mut watchdog_pid: Option<u32> = None;
+            'connection: loop {
+                if let Some(after) = hang_after {
+                    if started.elapsed() >= after {
+                        log::warn!("SIMULATING SHELL HANG: heartbeats stopped (test flag)");
+                        loop {
+                            std::thread::sleep(Duration::from_secs(60));
+                        }
+                    }
+                }
+
+                seq += 1;
+                let beat = wr_ipc::ToWatchdog::ShellHeartbeat {
+                    seq,
+                    pid: std::process::id(),
+                };
+                if conn.send(&beat).is_err() {
+                    // A broken pipe is a *dead* watchdog: the monitor thread
+                    // handles that. Just try to reach its successor.
+                    log::warn!("pipe write failed (watchdog gone); reconnecting");
+                    break 'connection;
+                }
+
+                // Drain acks/commands until the next beat is due.
+                let next_beat = Instant::now() + wr_ipc::HEARTBEAT_INTERVAL;
+                while Instant::now() < next_beat {
+                    match conn.try_recv::<wr_ipc::ToShell>() {
+                        Ok(Some(wr_ipc::ToShell::HeartbeatAck { pid, .. })) => {
+                            last_ack = Instant::now();
+                            watchdog_pid = Some(pid);
+                        }
+                        Ok(Some(wr_ipc::ToShell::Shutdown)) => {
+                            log::info!("shutdown requested over IPC");
+                            std::process::exit(0);
+                        }
+                        Ok(Some(wr_ipc::ToShell::ReloadConfig)) => {
+                            log::info!("ReloadConfig received (no config yet — Phase 1)");
+                        }
+                        Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+                        Err(_) => {
+                            log::warn!("pipe read failed (watchdog gone); reconnecting");
+                            break 'connection;
+                        }
+                    }
+                }
+
+                // The pipe is open but nothing answers: the watchdog is alive
+                // and wedged — with a dead hotkey and dead supervision. Kill it
+                // (the ack pid is authoritative, unlike the launch-time env
+                // var); the monitor thread relaunches it.
+                if last_ack.elapsed() > wr_ipc::HEARTBEAT_TIMEOUT {
+                    match watchdog_pid {
+                        Some(pid) => {
+                            log::error!(
+                                "watchdog silent for >{:?} on a live pipe; killing hung \
+                                 watchdog (pid {pid}) so the monitor relaunches it",
+                                wr_ipc::HEARTBEAT_TIMEOUT
+                            );
+                            kill_process(pid);
+                        }
+                        // Never acked: can't tell a hang from a peer that is
+                        // not our watchdog. Leave death detection to the
+                        // monitor thread.
+                        None => log::warn!("no heartbeat ack ever received; reconnecting"),
+                    }
+                    break 'connection;
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    fn kill_process(pid: u32) {
+        match unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) } {
+            Ok(handle) => unsafe {
+                if let Err(e) = TerminateProcess(handle, 1) {
+                    log::error!("failed to terminate pid {pid}: {e}");
+                }
+                let _ = CloseHandle(handle);
+            },
+            Err(e) => log::error!("failed to open pid {pid} for terminate: {e}"),
+        }
+    }
+
     /// Last resort with no watchdog to lean on: put explorer back ourselves.
     fn restore_windows_and_exit() -> ! {
         match wr_core::shell::restore_shell() {
@@ -163,6 +296,8 @@ mod guardian {
 struct Options {
     crash_after: Option<Duration>,
     exit_after: Option<Duration>,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    hang_heartbeat_after: Option<Duration>,
 }
 
 impl Options {
@@ -173,6 +308,8 @@ impl Options {
                 opts.crash_after = v.parse().ok().map(Duration::from_secs);
             } else if let Some(v) = arg.strip_prefix("--exit-after=") {
                 opts.exit_after = v.parse().ok().map(Duration::from_secs);
+            } else if let Some(v) = arg.strip_prefix("--hang-heartbeat-after=") {
+                opts.hang_heartbeat_after = v.parse().ok().map(Duration::from_secs);
             }
         }
         opts

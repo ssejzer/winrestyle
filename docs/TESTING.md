@@ -96,6 +96,32 @@ Validates the runaway cap (`wr-core::guardian`: >3 relaunches within 60 s).
    normal explorer desktop comes back on its own.
 3. Revert the snapshot when done.
 
+## T8 — Hung shell is killed and relaunched  (ADR 0003)
+
+No registry swap needed — run the watchdog directly from a terminal.
+
+1. In a terminal: `set WR_SHELL_TEST_ARGS=--hang-heartbeat-after=10`, then run
+   `wr-watchdog.exe` (the spawned shell inherits the env var and hangs its
+   heartbeat after 10 s while staying *alive*).
+2. ✅ Pass if ~5–6 s after the hang the watchdog logs
+   "shell heartbeat silent … killing hung shell" and relaunches it (new pid).
+   (The env var is inherited, so every relaunched shell hangs again — expect
+   the cycle to repeat about every 15 s.)
+3. Crash-loop interaction: rerun with `--hang-heartbeat-after=1`. Now each
+   hang-kill-relaunch cycle is ~6 s, fast enough to accumulate >3 exits inside
+   the 20 s crash-loop window. ✅ Pass if after ~4 cycles the watchdog logs
+   "crash-loop", restores the registry, and falls back to explorer.
+
+## T9 — Hung watchdog is killed and relaunched  (ADR 0003)
+
+**Snapshot first** if running swapped; also works unswapped from a terminal.
+
+1. Start the watchdog with `--ack-hang-after=20`. After 20 s its pipe server
+   freezes (simulating a wedged watchdog with a dead hotkey).
+2. ✅ Pass if ~5–6 s later the shell logs "watchdog silent … killing hung
+   watchdog", the monitor relaunches a fresh watchdog (new pid, no test flag),
+   the pair converges to one of each, and `Win + Ctrl + F1` works again.
+
 ## Resolved Phase 0 question
 
 How the watchdog is launched as the shell, and whether `explorer.exe` re-adopts

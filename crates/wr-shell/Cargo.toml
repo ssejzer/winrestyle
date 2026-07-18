@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 wr-core = { workspace = true }
+wr-ipc = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 

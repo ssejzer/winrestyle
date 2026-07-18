@@ -29,10 +29,11 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 
 - [ ] `wr-shell` paints desktop background / wallpaper.
 - [ ] `wr-shell` spawns and supervises child surfaces (the taskbar).
-- [ ] `wr-ipc` named-pipe protocol wired across watchdog ⇄ shell ⇄ installer.
-- [ ] `ShellHeartbeat` over `wr-ipc` — upgrade ADR 0002's process-handle
-      mutual supervision to hang detection (both directions) and remove the
-      PID-reuse race.
+- [x] `wr-ipc` named-pipe protocol wired across watchdog ⇄ shell (installer
+      client lands with the Phase 3 UI; `RequestRestore` is already served).
+- [x] `ShellHeartbeat` over `wr-ipc` — upgraded ADR 0002's process-handle
+      mutual supervision to hang detection (both directions) and removed the
+      PID-reuse race. (ADR 0003; VM tests T8/T9 pending.)
 - [ ] Config load from `%APPDATA%\WinRestyle\config.toml`.
 - [ ] **Logon autostart** — run what explorer would at shell start so the user's
       session isn't degraded: `Run` / `RunOnce` keys (HKCU + HKLM) and the

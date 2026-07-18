@@ -115,8 +115,16 @@ registry of these components to render its checklist. This is what makes the
 ## IPC
 
 `wr-watchdog`, `wr-shell`, and `wr-installer` coordinate over a Windows **named
-pipe** (`\\.\pipe\winrestyle`) with a small serde-encoded message protocol
-defined in `wr-ipc` (e.g. `RestoreShell`, `ReloadConfig`, `ShellHeartbeat`).
+pipe** (`\\.\pipe\winrestyle`) with a small serde-encoded (newline-delimited
+JSON) message protocol defined in `wr-ipc` (e.g. `RequestRestore`,
+`ReloadConfig`, `ShellHeartbeat`). The **watchdog hosts the pipe server**; the
+shell and installer connect as clients.
+
+The pipe also carries **hang detection** (ADR 0003): the shell heartbeats every
+second, the watchdog acks, and 5 s of silence on a live channel means the peer
+is hung — the observer kills it, converting the hang into a death that the
+ADR 0002 mutual-supervision paths already recover from. The heartbeat layer
+only detects; it never recovers.
 
 ## Configuration
 
@@ -129,8 +137,9 @@ via serde into `wr-core` types. File-watching enables live preview / hot reload.
   restore registry → kill custom shell → launch `explorer.exe`, which re-adopts
   the shell role).
 - Watchdog launch/ownership: **decided** — the watchdog is the registered shell.
-  Still open: how the watchdog *itself* is kept alive if it crashes (nothing
-  currently relaunches it).
+- Watchdog liveness: **decided** — mutual supervision (ADR 0002; Winlogon's
+  `AutoRestartShell` proved not to apply to custom per-user shells) plus
+  heartbeat-based hang detection over the pipe (ADR 0003).
 - Tray hosting completeness vs. effort (full `Shell_TrayWnd` protocol coverage).
 - Multi-monitor + DPI strategy for the taskbar.
 - Code signing / Defender + SmartScreen mitigation before public release.
