@@ -9,13 +9,17 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 > is solid.
 
 - [x] Cargo workspace + crate skeleton, docs, license.
-- [ ] `wr-core`: read/backup/set/restore the per-user `Winlogon\Shell` value.
-- [ ] `wr-shell` (dummy): a trivial window proving "I am the shell," with a
+- [x] `wr-core`: read/backup/set/restore the per-user `Winlogon\Shell` value. (T0 ✅)
+- [x] `wr-shell` (dummy): a trivial window proving "I am the shell," with a
       "simulate crash" trigger for testing the watchdog.
-- [ ] `wr-watchdog`: `Win+Ctrl+F1` global hotkey → emergency restore; monitor
-      `wr-shell`; crash-loop fallback to `explorer.exe`.
-- [ ] **Validate the mid-session full-shell restore mechanism** (the key unknown).
-- [ ] Manual test protocol in a Win11 VM (swap, crash, hotkey, crash-loop, uninstall).
+- [x] `wr-watchdog`: `Win+Ctrl+F1` global hotkey → emergency restore; monitor
+      `wr-shell`; crash-loop fallback to `explorer.exe`. (T1/T2/T3 ✅; a supervisor
+      deadlock on the hotkey path was found and fixed during VM testing.)
+- [x] **Validate the mid-session full-shell restore mechanism** (the key unknown).
+      ✅ Confirmed 2026-07-18: explorer re-adopts the shell role on restore. See
+      `docs/ARCHITECTURE.md`.
+- [x] Manual test protocol in a Win11 VM — T0–T4 ✅ (swap, crash, hotkey,
+      crash-loop, uninstall all pass; 2026-07-18, Win11 22H2 build 22621).
 
 ## Phase 1 — Minimal shell
 
@@ -23,6 +27,13 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 - [ ] `wr-shell` spawns and supervises child surfaces (the taskbar).
 - [ ] `wr-ipc` named-pipe protocol wired across watchdog ⇄ shell ⇄ installer.
 - [ ] Config load from `%APPDATA%\WinRestyle\config.toml`.
+- [ ] **Logon autostart** — run what explorer would at shell start so the user's
+      session isn't degraded: `Run` / `RunOnce` keys (HKCU + HKLM) and the
+      per-user + common Startup folders, plus session helpers like `rdpclip.exe`
+      (clipboard/redirection in remote/VM sessions). Each entry is enumerable and
+      **individually opt-in/out via config**; default mirrors Windows behavior.
+      (Scheduled-task "at logon" items are launched by Task Scheduler, not the
+      shell, so they still fire — not our responsibility.)
 
 ## Phase 2 — Taskbar (flagship)
 
@@ -37,6 +48,8 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 
 - [ ] Component registry + `Component` trait (`install`/`uninstall`/`apply`).
 - [ ] One-screen UI: component checklist + **Restyle Now** + uninstall.
+- [ ] **Startup-programs manager UI** — surface the Phase 1 logon-autostart
+      entries as a per-entry on/off list, so the opt-in/out has a real UX.
 - [ ] Safe apply: trial run → registry backup → swap; recovery instructions.
 - [ ] **This is where the target UX ships.**
 

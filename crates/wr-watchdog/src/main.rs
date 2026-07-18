@@ -124,15 +124,40 @@ mod win {
             log::info!("shell launched (pid {})", child.id());
             *g.child.lock().unwrap() = Some(child);
 
-            // Block until it exits (the hotkey path may kill it from elsewhere).
-            let status = {
+            // Wait for the shell to exit WITHOUT holding the lock across the
+            // blocking wait. The emergency-hotkey path (recover -> kill_child)
+            // needs this same lock to terminate a *still-running* child; holding
+            // it across a blocking `wait()` would deadlock recovery — the exact
+            // failure that leaves the desktop stuck with no way back. So poll
+            // `try_wait` and drop the lock between polls.
+            let status = loop {
+                if g.shutting_down.load(Ordering::SeqCst) {
+                    // Recovery is tearing us down and owns killing the child.
+                    return;
+                }
                 let mut guard = g.child.lock().unwrap();
                 match guard.as_mut() {
-                    Some(c) => c.wait(),
-                    None => break, // killed and taken by the hotkey path
+                    Some(c) => match c.try_wait() {
+                        Ok(Some(status)) => {
+                            *guard = None;
+                            break status;
+                        }
+                        Ok(None) => {
+                            drop(guard); // release before sleeping
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
+                        Err(e) => {
+                            *guard = None;
+                            drop(guard);
+                            log::error!("waiting on shell failed: {e}");
+                            recover(g, "waiting on shell failed");
+                            end_main_loop(g);
+                            return;
+                        }
+                    },
+                    None => return, // taken & killed by the recovery path
                 }
             };
-            *g.child.lock().unwrap() = None;
 
             if g.shutting_down.load(Ordering::SeqCst) {
                 break;
