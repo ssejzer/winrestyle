@@ -108,6 +108,22 @@ mod imp {
         Ok(())
     }
 
+    /// True if a desktop shell is on screen right now, detected via the
+    /// taskbar window class (`Shell_TrayWnd`) that explorer creates only when
+    /// running *as the shell* (not as a file manager). Recovery paths check
+    /// this before launching `explorer.exe`: when a live shell is already
+    /// present, a second explorer would not re-adopt the shell role — it
+    /// would just open a stray file-manager window. (A *hung* shell still
+    /// counts as present; recovering from a wedged explorer is not our
+    /// failure mode.)
+    pub fn desktop_shell_running() -> bool {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+        unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }
+            .map(|hwnd| !hwnd.is_invalid())
+            .unwrap_or(false)
+    }
+
     /// Restore the per-user shell to exactly what it was before WinRestyle, and
     /// clear our backup. Safe to call when nothing is applied.
     pub fn restore_shell() -> Result<RestoreOutcome> {
@@ -170,6 +186,11 @@ mod imp {
     pub fn restore_shell() -> Result<RestoreOutcome> {
         bail!(MSG)
     }
+    pub fn desktop_shell_running() -> bool {
+        false
+    }
 }
 
-pub use imp::{backup_and_set_shell, has_backup, read_user_shell, restore_shell};
+pub use imp::{
+    backup_and_set_shell, desktop_shell_running, has_backup, read_user_shell, restore_shell,
+};

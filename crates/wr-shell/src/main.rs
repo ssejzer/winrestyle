@@ -126,24 +126,6 @@ mod guardian {
 
         // The watchdog is gone — with it the emergency hotkey and our own
         // supervision. Relaunch it, unless it is crash-looping.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let state = RelaunchState::parse(std::env::var(RELAUNCH_STATE_ENV).ok().as_deref());
-        let state = state.bump(now);
-        if state.exhausted() {
-            log::error!(
-                "watchdog crash-loop ({} relaunches); restoring Windows",
-                state.count - 1
-            );
-            restore_windows_and_exit();
-        }
-
-        log::warn!(
-            "watchdog (pid {watchdog_pid}) died; relaunching it (attempt {})",
-            state.count
-        );
         let watchdog_exe = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("wr-watchdog.exe")));
@@ -151,16 +133,57 @@ mod guardian {
             log::error!("cannot locate wr-watchdog.exe next to wr-shell.exe");
             restore_windows_and_exit();
         };
-        match Command::new(&watchdog_exe)
-            .env(RELAUNCH_STATE_ENV, state.to_env_value())
-            .spawn()
-        {
-            // Nothing more to do: the new watchdog kills us (stray sweep) and
-            // spawns a fresh shell. Just keep running until then.
-            Ok(child) => log::info!("watchdog relaunched (pid {})", child.id()),
-            Err(e) => {
-                log::error!("failed to relaunch watchdog: {e}");
+
+        // Relaunch loop. The normal path runs a *single* iteration: the fresh
+        // watchdog's stray sweep kills us moments after we spawn it, and this
+        // thread dies with the process while blocked in `child.wait()`. But
+        // that is an expectation, not a guarantee — if the new watchdog dies
+        // before its sweep reaches us (crash on startup, rapid kills), we are
+        // the only guardian left and must keep relaunching, up to the cap.
+        // Waiting on our own Child handle also means no PID-reuse risk for
+        // generations after the first.
+        let mut state = RelaunchState::parse(std::env::var(RELAUNCH_STATE_ENV).ok().as_deref());
+        let mut last_pid = watchdog_pid;
+        loop {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            state = state.bump(now);
+            if state.exhausted() {
+                log::error!(
+                    "watchdog crash-loop ({} relaunches); restoring Windows",
+                    state.count - 1
+                );
                 restore_windows_and_exit();
+            }
+
+            log::warn!(
+                "watchdog (pid {last_pid}) died; relaunching it (attempt {})",
+                state.count
+            );
+            let mut child = match Command::new(&watchdog_exe)
+                .env(RELAUNCH_STATE_ENV, state.to_env_value())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("failed to relaunch watchdog: {e}");
+                    restore_windows_and_exit();
+                }
+            };
+            last_pid = child.id();
+            log::info!("watchdog relaunched (pid {last_pid})");
+
+            match child.wait() {
+                Ok(status) => log::warn!(
+                    "relaunched watchdog (pid {last_pid}) exited ({status:?}) \
+                     before adopting the session"
+                ),
+                Err(e) => {
+                    log::error!("waiting on relaunched watchdog failed: {e}");
+                    restore_windows_and_exit();
+                }
             }
         }
     }
@@ -284,9 +307,13 @@ mod guardian {
             Ok(outcome) => log::info!("registry restore: {outcome:?}"),
             Err(e) => log::error!("registry restore FAILED: {e:#}"),
         }
-        match Command::new("explorer.exe").spawn() {
-            Ok(_) => log::info!("launched explorer.exe"),
-            Err(e) => log::error!("failed to launch explorer.exe: {e}"),
+        if wr_core::shell::desktop_shell_running() {
+            log::info!("desktop shell already running; not launching explorer");
+        } else {
+            match Command::new("explorer.exe").spawn() {
+                Ok(_) => log::info!("launched explorer.exe"),
+                Err(e) => log::error!("failed to launch explorer.exe: {e}"),
+            }
         }
         std::process::exit(1);
     }

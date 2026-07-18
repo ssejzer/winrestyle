@@ -592,6 +592,7 @@ dependencies = [
  "log",
  "serde",
  "toml",
+ "windows",
  "winreg",
 ]
 

@@ -15,10 +15,8 @@
 
     powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 
-  Notes:
-  - T2/T7 exercise recovery paths that spawn explorer.exe; since explorer is
-    already your shell, that may open stray Explorer windows. Close them.
-  - Per-test logs land in target\vm-test-logs\ for debugging failures.
+  Fully hands-off: no logon, no hotkey, no interaction. Per-test logs land in
+  target\vm-test-logs\ for debugging failures.
 
 .PARAMETER SkipPull
   Don't run `git pull` first (e.g. testing local uncommitted work).
@@ -276,5 +274,4 @@ if ($failed) {
 }
 Write-Host 'All automated tests passed.' -ForegroundColor Green
 Write-Host 'Still manual (once per release): T3 - real swap + logon + Win+Ctrl+F1.'
-Write-Host 'Recovery tests may have opened Explorer windows - safe to close.'
 exit 0

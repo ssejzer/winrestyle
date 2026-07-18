@@ -304,9 +304,15 @@ mod win {
             Err(e) => log::error!("registry restore FAILED: {e:#}"),
         }
 
-        match Command::new("explorer.exe").spawn() {
-            Ok(_) => log::info!("launched explorer.exe"),
-            Err(e) => log::error!("failed to launch explorer.exe: {e}"),
+        if wr_core::shell::desktop_shell_running() {
+            // A live shell (explorer's taskbar) is already on screen — a
+            // second explorer would only open a file-manager window.
+            log::info!("desktop shell already running; not launching explorer");
+        } else {
+            match Command::new("explorer.exe").spawn() {
+                Ok(_) => log::info!("launched explorer.exe"),
+                Err(e) => log::error!("failed to launch explorer.exe: {e}"),
+            }
         }
     }
 

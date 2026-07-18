@@ -55,6 +55,22 @@ Defined in `wr-core::guardian`:
 stops relaunching, restores the registry itself (`wr-core`), and starts
 `explorer.exe` — mirroring the watchdog's own shell-crash-loop policy.
 
+## Amendment: the shell's monitor guards across generations (found by automated T7, 2026-07-18)
+
+The first implementation's monitor was one-shot: relaunch the watchdog once,
+then return, *assuming* the new watchdog's stray sweep would kill this shell.
+Automated T7 (rapid kills) broke that assumption — a relaunched watchdog killed
+during startup, before its sweep ran, left the shell alive with **no watchdog,
+no hotkey, no supervision, and no detector for any of it**. The same happens
+outside tests if the watchdog crashes early in startup.
+
+Fix: the monitor loops. Each relaunched watchdog is spawned as the shell's
+*child* and the monitor blocks in `child.wait()` — the normal outcome is still
+that the sweep kills the shell mid-wait (one iteration), but if the watchdog
+dies first, the monitor bumps the relaunch state and spawns the next one, up to
+the existing runaway cap. Waiting on the child handle also eliminates PID-reuse
+risk for every generation after the first.
+
 ## Verification
 
 Revised T5–T7 **all pass** (2026-07-18, Win11 22H2 build 22621, Hyper-V):
