@@ -1,0 +1,83 @@
+# ADR 0002 — Watchdog crash recovery via mutual supervision
+
+- **Status:** Accepted (2026-07-18)
+- **Supersedes:** the `AutoRestartShell` reliance in [ADR 0001](0001-watchdog-liveness.md)
+  (its stray-shell sweep and Phase 1 heartbeat plan stand).
+
+## Context
+
+ADR 0001 bet watchdog-crash recovery on Winlogon's `AutoRestartShell`
+mechanism, flagged it as *must be confirmed in the VM*, and defined T5 as the
+confirming test. **T5 failed** (2026-07-18, Win11 22H2 build 22621, Hyper-V):
+with the swap applied, a killed `wr-watchdog.exe` was never relaunched —
+`AutoRestartShell = 1` notwithstanding — leaving an orphaned `wr-shell`, no
+emergency hotkey, and no supervision until a manual
+`wr-installer restore` + `start explorer.exe`.
+
+This matches long-standing reports from the kiosk/embedded community: the
+mechanism effectively restarts only `explorer.exe`, not a custom shell (and
+especially not one configured per-user in HKCU). The GINA/logon revamp after
+Windows 2000 gutted the original behavior, and the standard workaround has
+always been a monitor process. Sources:
+
+- [Auto Restart a Custom Shell on termination](https://groups.google.com/g/microsoft.public.windowsxp.embedded/c/IZ1mBrlAruY)
+  (microsoft.public.windowsxp.embedded)
+- [Automatically restart shell](https://www.pcreview.co.uk/threads/automatically-restart-shell.2814802/)
+- [Auto Restart Shell](https://www.visualautomation.com/comprod/secure6/auto_res.htm)
+
+## Decision
+
+**The watchdog and shell supervise each other.** No new process (rejecting
+ADR 0001's option B a second time, now with the evidence updated):
+
+- The watchdog supervises `wr-shell` exactly as before (relaunch on exit,
+  crash-loop fallback to explorer).
+- `wr-shell` watches the watchdog *process* and relaunches it if it dies. The
+  relaunched watchdog's stray sweep (ADR 0001) then kills the old shell and
+  spawns a fresh one — the pair always converges to exactly one of each.
+- The `AutoRestartShell` startup check from ADR 0001 is removed: T5 proved the
+  value is irrelevant to a custom per-user shell, and logging "Winlogon
+  relaunches us" would be false confidence.
+
+### Protocol (Phase 0: environment variables; Phase 1: `wr-ipc`)
+
+Defined in `wr-core::guardian`:
+
+- `WR_WATCHDOG_PID` — set by the watchdog on each shell it spawns; the shell
+  opens that process handle and waits on it.
+- `WR_WD_RELAUNCH_STATE` (`"<count>:<first-unix-secs>"`) — watchdog-relaunch
+  accounting, threaded through the spawn chain. Needed because each hop in the
+  relaunch cycle (shell relaunches watchdog → watchdog spawns fresh shell) is a
+  *new* process whose in-memory counters reset; without carried state, a
+  watchdog that crashes on startup would flicker forever.
+
+**Runaway cap:** more than 3 watchdog relaunches within 60 s and the shell
+stops relaunching, restores the registry itself (`wr-core`), and starts
+`explorer.exe` — mirroring the watchdog's own shell-crash-loop policy.
+
+## Verification
+
+Revised T5–T7 **all pass** (2026-07-18, Win11 22H2 build 22621, Hyper-V):
+killing either process brings the pair back; repeated kills trip the runaway
+cap and the desktop self-restores to explorer. Note the cap's restore is
+*permanent by design* — it rewrites `HKCU Shell`, so the next logon is stock
+Windows and re-enabling WinRestyle requires an explicit `wr-installer apply`.
+A broken install can never survive a re-logon.
+
+## Consequences
+
+- Watchdog *crash* recovery is now our own code on both sides, empirically
+  testable (revised T5–T7 in `docs/TESTING.md`), instead of an OS mechanism
+  that turned out not to apply.
+- Known, accepted gaps for Phase 0:
+  - **Both processes dying simultaneously** — nothing recovers; the user falls
+    back to `Ctrl+Shift+Esc` → run `explorer.exe` manually. Unchanged from
+    before.
+  - **PID reuse race** — if the watchdog dies in the milliseconds between
+    spawning the shell and the shell opening the handle, the shell could watch
+    a recycled PID. Phase 1's pipe heartbeat removes this entirely.
+  - **A hung (not dead) watchdog** — still deferred, as in ADR 0001; the
+    Phase 1 heartbeat is the building block for closing it.
+- The env-var protocol is deliberately temporary; Phase 1 replaces the
+  process-handle wait with `ShellHeartbeat` over `wr-ipc`, which detects hangs
+  as well as deaths in both directions.

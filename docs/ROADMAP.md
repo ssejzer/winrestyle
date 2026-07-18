@@ -2,7 +2,7 @@
 
 Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 
-## Phase 0 — Safety harness & shell-swap spike ⭐ (current)
+## Phase 0 — Safety harness & shell-swap spike ✅ (complete 2026-07-18)
 
 > The make-or-break phase. **No UI.** Goal: prove swap → crash → restore is
 > bulletproof with a throwaway dummy shell. Do not build the taskbar until this
@@ -20,12 +20,19 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       `docs/ARCHITECTURE.md`.
 - [x] Manual test protocol in a Win11 VM — T0–T4 ✅ (swap, crash, hotkey,
       crash-loop, uninstall all pass; 2026-07-18, Win11 22H2 build 22621).
+- [x] **Watchdog liveness** — the original bet (Winlogon `AutoRestartShell`,
+      ADR 0001) was falsified by T5; replaced with mutual supervision
+      (ADR 0002). Revised T5–T7 ✅ (watchdog relaunch, no duplicate desktop,
+      crash-loop → full self-restore; 2026-07-18).
 
-## Phase 1 — Minimal shell
+## Phase 1 — Minimal shell ⭐ (current)
 
 - [ ] `wr-shell` paints desktop background / wallpaper.
 - [ ] `wr-shell` spawns and supervises child surfaces (the taskbar).
 - [ ] `wr-ipc` named-pipe protocol wired across watchdog ⇄ shell ⇄ installer.
+- [ ] `ShellHeartbeat` over `wr-ipc` — upgrade ADR 0002's process-handle
+      mutual supervision to hang detection (both directions) and remove the
+      PID-reuse race.
 - [ ] Config load from `%APPDATA%\WinRestyle\config.toml`.
 - [ ] **Logon autostart** — run what explorer would at shell start so the user's
       session isn't degraded: `Run` / `RunOnce` keys (HKCU + HKLM) and the

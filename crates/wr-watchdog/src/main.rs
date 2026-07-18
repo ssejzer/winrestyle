@@ -9,11 +9,12 @@
 //! 3. Detects a crash-loop (too many exits too fast) and falls back to
 //!    `explorer.exe` instead of relaunching forever.
 //!
-//! The watchdog's *own* crash recovery is Winlogon's `AutoRestartShell`
-//! mechanism (we are the registered shell). See ADR 0001
-//! (`docs/decisions/0001-watchdog-liveness.md`): on startup we warn if that
-//! mechanism is disabled and kill any stray `wr-shell` a previous watchdog
-//! instance left behind.
+//! The watchdog's *own* crash recovery is **mutual supervision**: `wr-shell`
+//! watches our process and relaunches us if we die (Winlogon's
+//! `AutoRestartShell` does NOT restart a custom per-user shell — T5 disproved
+//! that; see ADR 0002 in `docs/decisions/`). On startup we kill any stray
+//! `wr-shell` a previous watchdog instance left behind, so a relaunch always
+//! converges back to exactly one watchdog + one shell.
 //!
 //! ## Phase 0 status
 //!
@@ -82,14 +83,10 @@ mod win {
         let shell_exe = shell_exe_path().context("locating wr-shell.exe")?;
         log::info!("watchdog starting; shell = {}", shell_exe.display());
 
-        // ADR 0001: our own crash recovery is Winlogon's `AutoRestartShell`
-        // (we are the registered shell, so Winlogon relaunches us). We never
-        // write HKLM — only read it to warn loudly when that safety net is off.
-        check_auto_restart_shell();
-
-        // ADR 0001: if Winlogon just relaunched us after a crash, our previous
-        // wr-shell child is still running (Windows does not kill orphans).
-        // Spawning another would give the user two desktops — sweep first.
+        // ADR 0002: if wr-shell just relaunched us after a crash, that shell —
+        // and possibly the crashed watchdog's other strays — are still running
+        // (Windows does not kill orphans). Spawning another shell would give
+        // the user two desktops — sweep first.
         kill_stray_shells(&shell_exe);
 
         let guardian = Guardian {
@@ -128,7 +125,16 @@ mod win {
         let mut crashes: Vec<Instant> = Vec::new();
 
         while !g.shutting_down.load(Ordering::SeqCst) {
-            let child = match Command::new(shell_exe).spawn() {
+            // ADR 0002 mutual supervision: tell the shell which process to
+            // watch. WR_WD_RELAUNCH_STATE (if a shell relaunched us) is passed
+            // along implicitly via normal env inheritance.
+            let child = match Command::new(shell_exe)
+                .env(
+                    wr_core::guardian::WATCHDOG_PID_ENV,
+                    std::process::id().to_string(),
+                )
+                .spawn()
+            {
                 Ok(c) => c,
                 Err(e) => {
                     log::error!("failed to launch shell: {e}");
@@ -225,26 +231,6 @@ mod win {
         }
     }
 
-    /// Warn (loudly) if Winlogon's shell auto-restart is disabled, since that
-    /// is the only thing that recovers a *watchdog* crash.
-    fn check_auto_restart_shell() {
-        match wr_core::shell::read_auto_restart_shell() {
-            // Absent means default, and the default is enabled.
-            Ok(Some(1)) | Ok(None) => {
-                log::info!("AutoRestartShell is on: Winlogon relaunches us if we crash");
-            }
-            Ok(Some(v)) => {
-                log::error!(
-                    "AutoRestartShell = {v} (expected 1): if the watchdog crashes, \
-                     Winlogon will NOT relaunch it — no emergency hotkey, no shell \
-                     supervision. Re-enable it (HKLM Winlogon\\AutoRestartShell = 1) \
-                     before relying on WinRestyle. We never change HKLM ourselves."
-                );
-            }
-            Err(e) => log::warn!("could not read AutoRestartShell: {e:#}"),
-        }
-    }
-
     /// Kill any `wr-shell.exe` left over from a previous watchdog instance.
     /// Runs once at startup, before we spawn our own child.
     fn kill_stray_shells(shell_exe: &Path) {
@@ -253,9 +239,7 @@ mod win {
             CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
             TH32CS_SNAPPROCESS,
         };
-        use windows::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-        };
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
         let target = match shell_exe.file_name().and_then(|n| n.to_str()) {
             Some(name) => name.to_ascii_lowercase(),

@@ -1,6 +1,9 @@
 # ADR 0001 — Keeping the watchdog itself alive
 
-- **Status:** Proposed (2026-07-18)
+- **Status:** Superseded in part by [ADR 0002](0002-mutual-supervision.md)
+  (2026-07-18) — **T5 failed**: `AutoRestartShell` does not restart a custom
+  per-user shell, so the option-A reliance on it is abandoned. The stray-shell
+  sweep and the Phase 1 heartbeat plan stand.
 - **Phase:** closes the last Phase 0 open item; part of it lands in Phase 1.
 
 ## Context

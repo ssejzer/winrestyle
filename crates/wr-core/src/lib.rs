@@ -4,6 +4,7 @@
 //! The single most important invariant in this whole project: **we must always
 //! be able to put `explorer.exe` back.** That logic lives in [`shell`].
 
+pub mod guardian;
 pub mod shell;
 
 /// The named pipe used to coordinate watchdog ⇄ shell ⇄ installer.

@@ -59,41 +59,42 @@ This is the real shell-swap test. **Snapshot first.**
 2. ✅ Pass if `HKCU Shell` matches the `clean` snapshot and the `HKCU\Software\
    WinRestyle` backup key is gone.
 
-## T5 — Winlogon relaunches a killed watchdog  ⭐ validates ADR 0001
+## T5 — Shell relaunches a killed watchdog  ⭐ validates ADR 0002
 
-The watchdog's own crash recovery is Winlogon's `AutoRestartShell` (HKLM,
-default `1`) — see `docs/decisions/0001-watchdog-liveness.md`. This test
-confirms that assumption. **Snapshot first.**
+> The original T5 (Winlogon's `AutoRestartShell` relaunches the watchdog)
+> **failed** on 2026-07-18 — the mechanism ignores custom per-user shells. See
+> `docs/decisions/0002-mutual-supervision.md`; the shell now relaunches the
+> watchdog itself.
+
+**Snapshot first.**
 
 1. `wr-installer apply`, log out and back in (the watchdog is now the running
-   shell, as in T3). Note the `wr-watchdog.exe` pid in Task Manager.
+   shell, as in T3). Note the `wr-watchdog.exe` and `wr-shell.exe` pids in Task
+   Manager (`Ctrl+Shift+Esc`).
 2. Kill `wr-watchdog.exe` from Task Manager (simulates a watchdog crash).
-3. ✅ Pass if Winlogon relaunches the watchdog (new pid appears within a few
-   seconds, and its log shows the startup banner again) **and** the
-   `Win + Ctrl + F1` hotkey still restores the desktop afterwards.
-4. ❌ If nothing relaunches, ADR 0001's "no second guardian" decision must be
-   revisited before Phase 1.
+3. ✅ Pass if, within a couple of seconds: the shell logs
+   "watchdog … died; relaunching"; a new `wr-watchdog.exe` appears (new pid);
+   **and** `Win + Ctrl + F1` still restores the desktop afterwards.
 
-## T6 — No duplicate desktop after a watchdog restart
+## T6 — No duplicate desktop after a watchdog relaunch
 
-Run immediately after T5 step 3 (before pressing the hotkey).
+Run immediately after T5 step 2 (before pressing the hotkey).
 
-1. In Task Manager, count `wr-shell.exe` processes.
-2. ✅ Pass if exactly **one** `wr-shell.exe` is running — the relaunched
-   watchdog must have killed the orphaned child from the old instance (its log
-   shows a "killing stray wr-shell.exe" line) before spawning its own.
+1. In Task Manager, count `wr-shell.exe` and `wr-watchdog.exe` processes.
+2. ✅ Pass if exactly **one of each** is running. The relaunched watchdog must
+   have killed the old shell (log: "killing stray wr-shell.exe") and spawned a
+   fresh one (new `wr-shell.exe` pid vs. step 1 of T5).
 
-## T7 — Rapid watchdog restart (Winlogon throttling)
+## T7 — Watchdog crash-loop ends in a restored desktop
 
-Determines whether Winlogon throttles or gives up when the shell keeps dying.
+Validates the runaway cap (`wr-core::guardian`: >3 relaunches within 60 s).
 
-1. From T5's end state, kill the relaunched `wr-watchdog.exe` again as soon as
-   it appears; repeat ~5–10 times in quick succession.
-2. Record: does Winlogon keep relaunching indefinitely, or stop after N
-   attempts / start delaying? There is no fixed pass criterion — the goal is
-   data. Write the observed behavior into ADR 0001.
-3. Finish with `Win + Ctrl + F1` (if a watchdog is alive) or a manual
-   `wr-installer restore` + re-logon, then revert the snapshot.
+1. From T5's end state, kill `wr-watchdog.exe` again as soon as it reappears;
+   repeat quickly.
+2. ✅ Pass if after ~4 kills within a minute the cycle stops: the shell logs
+   "watchdog crash-loop … restoring Windows", `HKCU Shell` is restored, and the
+   normal explorer desktop comes back on its own.
+3. Revert the snapshot when done.
 
 ## Resolved Phase 0 question
 
