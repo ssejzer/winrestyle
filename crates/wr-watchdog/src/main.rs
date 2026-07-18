@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(windows)]
 mod win {
     use anyhow::{Context, Result};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::{Child, Command};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -106,8 +106,11 @@ mod win {
         // ADR 0002: if wr-shell just relaunched us after a crash, that shell —
         // and possibly the crashed watchdog's other strays — are still running
         // (Windows does not kill orphans). Spawning another shell would give
-        // the user two desktops — sweep first.
-        kill_stray_shells(&shell_exe);
+        // the user two desktops — sweep first. The old shell's taskbar (our
+        // grandchild, ADR 0005) is equally stray: the fresh shell spawns its
+        // own.
+        wr_core::process::kill_all_named(wr_core::SHELL_EXE);
+        wr_core::process::kill_all_named(wr_core::TASKBAR_EXE);
 
         let guardian = Guardian {
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -304,6 +307,9 @@ mod win {
         log::warn!("EMERGENCY RECOVER ({reason})");
 
         kill_child(g);
+        // The taskbar is the shell's child, not ours — killing the shell does
+        // not reap it, and it must not sit on top of the restored desktop.
+        wr_core::process::kill_all_named(wr_core::TASKBAR_EXE);
 
         match wr_core::shell::restore_shell() {
             Ok(outcome) => log::info!("registry restore: {outcome:?}"),
@@ -423,61 +429,6 @@ mod win {
             *g.pipe_alive.lock().unwrap() = None;
             server.disconnect();
             log::info!("pipe client disconnected");
-        }
-    }
-
-    /// Kill any `wr-shell.exe` left over from a previous watchdog instance.
-    /// Runs once at startup, before we spawn our own child.
-    fn kill_stray_shells(shell_exe: &Path) {
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-            TH32CS_SNAPPROCESS,
-        };
-        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-
-        let target = match shell_exe.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name.to_ascii_lowercase(),
-            None => return,
-        };
-
-        let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("stray-shell sweep skipped: process snapshot failed: {e}");
-                return;
-            }
-        };
-
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
-        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
-        while more {
-            let len = entry
-                .szExeFile
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(entry.szExeFile.len());
-            let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
-            if name == target {
-                let pid = entry.th32ProcessID;
-                log::warn!("killing stray {target} (pid {pid}) from a previous watchdog");
-                match unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) } {
-                    Ok(process) => unsafe {
-                        if let Err(e) = TerminateProcess(process, 1) {
-                            log::error!("failed to kill stray pid {pid}: {e}");
-                        }
-                        let _ = CloseHandle(process);
-                    },
-                    Err(e) => log::error!("failed to open stray pid {pid}: {e}"),
-                }
-            }
-            more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
-        }
-        unsafe {
-            let _ = CloseHandle(snapshot);
         }
     }
 

@@ -85,6 +85,26 @@ already on screen.
 > `try_wait` and releases the lock between polls. (A violation of exactly this
 > deadlocked the emergency hotkey during the Phase 0 spike before it was fixed.)
 
+### Process tree & child surfaces (ADR 0005)
+
+```
+wr-watchdog            (registered shell: hotkey, pipe server, supervisor)
+└─ wr-shell            (wallpaper, autostart, guardian threads)
+   └─ wr-taskbar       (Phase 2 UI surface)
+```
+
+UI surfaces are children of the **shell**, not the watchdog: crash isolation
+without entangling the safety harness. Surface supervision is deliberately
+weaker — the shell relaunches a dead taskbar, and a crash-looping taskbar
+makes the shell *give up on the taskbar* (logged error, nothing more). A
+missing surface degrades the desktop; it is never a recovery trigger.
+
+Because surfaces are grandchildren that outlive a killed parent, **every
+recovery path sweeps them by name** (`wr_core::process::kill_all_named`):
+watchdog startup and `recover()`, shell startup and its clean-shutdown paths.
+An emergency restore must never leave a WinRestyle bar over the recovered
+explorer desktop.
+
 ### 2. Registry backup + rollback (`wr-core`)
 
 - On install/apply: read the current `HKCU` (or effective) `Shell` value and
@@ -145,6 +165,10 @@ good config. Hot reload is driven by the `ReloadConfig` IPC message (sent by the
 installer once it exists; the watchdog's `--send-reload-every` test flag until
 then). File-watching for live preview may come later.
 
+Surface processes (the taskbar) load the same file themselves; the shell
+forwards a reload by posting the registered `WinRestyleConfigChanged` window
+message to the surface's window class (ADR 0005) — no second pipe.
+
 ## Open questions (tracked, not yet decided)
 
 - ~~Exact mid-session shell-restore mechanism~~ — **resolved** (see above:
@@ -154,6 +178,9 @@ then). File-watching for live preview may come later.
 - Watchdog liveness: **decided** — mutual supervision (ADR 0002; Winlogon's
   `AutoRestartShell` proved not to apply to custom per-user shells) plus
   heartbeat-based hang detection over the pipe (ADR 0003).
-- Tray hosting completeness vs. effort (full `Shell_TrayWnd` protocol coverage).
+- Tray hosting completeness vs. effort (full `Shell_TrayWnd` protocol
+  coverage). Hard prereq recorded in ADR 0005: `desktop_shell_running()`
+  detects a live desktop via the `Shell_TrayWnd` class, so once *we* create
+  one, recovery must be able to tell ours from explorer's.
 - Multi-monitor + DPI strategy for the taskbar.
 - Code signing / Defender + SmartScreen mitigation before public release.

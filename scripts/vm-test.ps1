@@ -7,8 +7,10 @@
   Automates docs/TESTING.md: T0 (registry round-trip), T1/T2 (shell crash /
   crash-loop), T5/T6/T7 (watchdog kill / convergence / runaway cap),
   T8/T9 (hung shell / hung watchdog via the ADR 0003 heartbeat),
-  T10/T11 (config load + hot reload over IPC; wallpaper paint + repaint), and
-  T12 (logon autostart + config opt-out, ADR 0004).
+  T10/T11 (config load + hot reload over IPC; wallpaper paint + repaint),
+  T12 (logon autostart + config opt-out, ADR 0004), and T13 (taskbar surface
+  supervision: spawn/paint, relaunch, crash-loop give-up, config opt-out,
+  ADR 0005).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
   desktop + Win+Ctrl+F1) and the logged-in halves of T4.
@@ -77,11 +79,11 @@ function Get-Pids([string]$Name) {
     @(Get-Process -Name $Name -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 }
 
-# Killing one of the pair makes the other resurrect it (that's the feature),
-# so sweep both repeatedly until neither remains.
+# Killing one of the family makes a survivor resurrect it (that's the
+# feature), so sweep all of them repeatedly until none remain.
 function Stop-WrProcesses {
     foreach ($attempt in 1..8) {
-        $procs = Get-Process -Name 'wr-shell', 'wr-watchdog' -ErrorAction SilentlyContinue
+        $procs = Get-Process -Name 'wr-shell', 'wr-watchdog', 'wr-taskbar' -ErrorAction SilentlyContinue
         if (-not $procs) { return }
         $procs | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 400
@@ -92,6 +94,7 @@ function Stop-WrProcesses {
 function Reset-TestEnv {
     Stop-WrProcesses
     Remove-Item Env:\WR_SHELL_TEST_ARGS -ErrorAction SilentlyContinue
+    Remove-Item Env:\WR_TASKBAR_TEST_ARGS -ErrorAction SilentlyContinue
 }
 
 function Wait-Until([scriptblock]$Condition, [int]$TimeoutSec = 15) {
@@ -341,6 +344,54 @@ try {
     Record 'T12 config opt-out skips the entry' ($skipLogged -and $notRun) `
         "skipLogged=$skipLogged notRun=$notRun" -LogFile $wd.Log
     Remove-ItemProperty -Path $RunKey -Name 'WinRestyleT12' -ErrorAction SilentlyContinue
+    Reset-TestEnv
+
+    # ---- T13: taskbar surface supervision (ADR 0005) -----------------------
+    # Unswapped, the taskbar detects explorer's live desktop and stays
+    # non-topmost, so this never covers the VM's real taskbar. Rendering is
+    # asserted via logs (like T11); visuals are eyeballed at the manual T3.
+    Write-Section 'T13: taskbar spawns/paints, relaunches, crash-loop gives up'
+    Remove-Item $ConfigFile -ErrorAction SilentlyContinue   # defaults: taskbar enabled
+    $wd = Start-Watchdog -LogName 't13'
+    $up = Wait-Until {
+        ((Get-Pids 'wr-taskbar').Count -eq 1) -and ((Get-Log $wd.Log) -match 'taskbar window up')
+    } 25
+    $painted = Wait-Until { (Get-Log $wd.Log) -match 'taskbar painted: color ' } 15
+    Record 'T13 taskbar spawns and paints' ($up -and $painted) "up=$up painted=$painted" -LogFile $wd.Log
+
+    $t1 = @(Get-Pids 'wr-taskbar')[0]
+    if ($null -ne $t1) { Stop-Process -Id $t1 -Force -ErrorAction SilentlyContinue }
+    $relaunched = Wait-Until {
+        $pids = Get-Pids 'wr-taskbar'
+        ($pids.Count -eq 1) -and ($pids[0] -ne $t1)
+    } 15
+    $loggedRelaunch = (Get-Log $wd.Log) -match 'relaunching taskbar'
+    Record 'T13 killed taskbar is relaunched by the shell' ($relaunched -and $loggedRelaunch) `
+        "relaunched=$relaunched logged=$loggedRelaunch" -LogFile $wd.Log
+    Reset-TestEnv
+
+    # Crash-loop: the shell must give up on the taskbar and itself stay alive
+    # (the taskbar is cosmetic - its failure never escalates to recovery).
+    $env:WR_TASKBAR_TEST_ARGS = '--crash-after=1'
+    $wd = Start-Watchdog -LogName 't13b'
+    $gaveUp = Wait-Until { (Get-Log $wd.Log) -match 'taskbar crash-loop' } 45
+    Start-Sleep -Seconds 2
+    $pairAlive = ((Get-Pids 'wr-shell').Count -eq 1) -and ((Get-Pids 'wr-watchdog').Count -eq 1)
+    $taskbarGone = (Get-Pids 'wr-taskbar').Count -eq 0
+    Record 'T13 taskbar crash-loop gives up; shell+watchdog unaffected' `
+        ($gaveUp -and $pairAlive -and $taskbarGone) `
+        "gaveUp=$gaveUp pairAlive=$pairAlive taskbarGone=$taskbarGone" -LogFile $wd.Log
+    Reset-TestEnv
+
+    # Config opt-out: [taskbar] enabled = false means it is never spawned.
+    $script:ConfigTouched = $true
+    Set-Content $ConfigFile "[taskbar]`nenabled = false"
+    $wd = Start-Watchdog -LogName 't13c'
+    $skipped = Wait-Until { (Get-Log $wd.Log) -match 'taskbar disabled in config; not spawning it' } 25
+    Start-Sleep -Seconds 2
+    $noTaskbar = (Get-Pids 'wr-taskbar').Count -eq 0
+    Record 'T13 config opt-out never spawns the taskbar' ($skipped -and $noTaskbar) `
+        "skipped=$skipped noTaskbar=$noTaskbar" -LogFile $wd.Log
     Reset-TestEnv
 }
 finally {

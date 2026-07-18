@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub wallpaper: Wallpaper,
     pub autostart: Autostart,
+    pub taskbar: Taskbar,
 }
 
 /// `[wallpaper]` — what the shell paints behind everything.
@@ -80,6 +81,43 @@ impl Autostart {
     /// Should this entry launch? Case-insensitive on the id.
     pub fn allows(&self, id: &str) -> bool {
         self.enabled && !self.disabled.iter().any(|d| d.eq_ignore_ascii_case(id))
+    }
+}
+
+/// `[taskbar]` — the Phase 2 taskbar surface. All lengths are physical pixels
+/// at 96 DPI; the taskbar scales them by the monitor's actual DPI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Taskbar {
+    /// Master switch. `false` means the shell does not spawn the taskbar.
+    pub enabled: bool,
+    /// Bar height.
+    pub height: u32,
+    /// Bar fill color.
+    pub color: Color,
+    /// Bar opacity, `0` (invisible) to `255` (fully opaque).
+    pub alpha: u8,
+    /// Rounded-corner radius. `0` = square.
+    pub corner_radius: u32,
+    /// Gap between the bar and the screen's bottom/side edges. `0` = docked
+    /// edge to edge.
+    pub margin: u32,
+}
+
+impl Default for Taskbar {
+    fn default() -> Self {
+        Taskbar {
+            enabled: true,
+            height: 48,
+            color: Color {
+                r: 0x10,
+                g: 0x10,
+                b: 0x1a,
+            },
+            alpha: 0xe0,
+            corner_radius: 12,
+            margin: 8,
+        }
     }
 }
 
@@ -294,6 +332,29 @@ mod tests {
             config.wallpaper.image.as_deref(),
             Some(Path::new(r"C:\Users\me\bg.jpg"))
         );
+    }
+
+    #[test]
+    fn taskbar_defaults_are_sane() {
+        let taskbar = toml::from_str::<Config>("").unwrap().taskbar;
+        assert!(taskbar.enabled);
+        assert!(taskbar.height > 0);
+        assert_eq!(taskbar, Taskbar::default());
+    }
+
+    #[test]
+    fn taskbar_section_parses() {
+        let config: Config = toml::from_str(
+            "[taskbar]\nenabled = false\nheight = 56\ncolor = \"#334455\"\n\
+             alpha = 128\ncorner_radius = 0\nmargin = 0\n",
+        )
+        .unwrap();
+        assert!(!config.taskbar.enabled);
+        assert_eq!(config.taskbar.height, 56);
+        assert_eq!(config.taskbar.color.to_string(), "#334455");
+        assert_eq!(config.taskbar.alpha, 128);
+        assert_eq!(config.taskbar.corner_radius, 0);
+        assert_eq!(config.taskbar.margin, 0);
     }
 
     #[test]

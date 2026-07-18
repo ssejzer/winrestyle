@@ -25,13 +25,16 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       (ADR 0002). Revised T5–T7 ✅ (watchdog relaunch, no duplicate desktop,
       crash-loop → full self-restore; 2026-07-18).
 
-## Phase 1 — Minimal shell ⭐ (current)
+## Phase 1 — Minimal shell ✅ (complete 2026-07-19; T13 VM validation pending)
 
 - [x] `wr-shell` paints desktop background / wallpaper (bottom-most
       virtual-screen window, config color + optional WIC image, repaint on
       `ReloadConfig`; automated T11 green 2026-07-18 — logs only; eyeball the
       visual half at the next manual T3).
-- [ ] `wr-shell` spawns and supervises child surfaces (the taskbar).
+- [x] `wr-shell` spawns and supervises child surfaces (the taskbar) —
+      shipped as the Phase 2 taskbar skeleton, ADR 0005 (relaunch, crash-loop
+      give-up, stray sweep on every recovery path). Automated T13 written;
+      first VM run pending.
 - [x] `wr-ipc` named-pipe protocol wired across watchdog ⇄ shell (installer
       client lands with the Phase 3 UI; `RequestRestore` is already served).
 - [x] `ShellHeartbeat` over `wr-ipc` — upgraded ADR 0002's process-handle
@@ -55,13 +58,24 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       half (actual startup apps + no re-run after a crash relaunch) gets
       verified at the next manual T3.
 
-## Phase 2 — Taskbar (flagship)
+## Phase 2 — Taskbar (flagship) ⭐ (current)
 
-- [ ] Direct2D/DirectComposition rendering (acrylic, rounded, themeable).
+- [x] Taskbar process skeleton (ADR 0005): spawned/supervised by the shell,
+      `[taskbar]` config section (enabled/height/color/alpha/radius/margin)
+      with hot reload and opt-out; non-topmost when unswapped. (2026-07-19;
+      T13 VM run pending.)
+- [x] Direct2D/DirectComposition rendering, first slice: premultiplied-alpha
+      composition swapchain (WARP fallback for GPU-less VMs), rounded
+      translucent themed bar, DPI-aware, DirectWrite clock. (2026-07-19.)
+- [ ] Acrylic/blur backdrop; richer theming.
 - [ ] Running-window enumeration → buttons; activate / minimize / restore.
-- [ ] Clock + basic widgets; Start button (stub launch).
+- [ ] Widgets beyond the clock (shipped with the first slice); Start button
+      (stub launch).
 - [ ] Pinned apps.
 - [ ] **System tray hosting** (`Shell_TrayWnd` / `Shell_NotifyIcon` protocol).
+      Prereq recorded in ADR 0005: `desktop_shell_running()` must first learn
+      to tell explorer's `Shell_TrayWnd` from ours, or recovery idempotence
+      breaks.
 - [ ] Multi-monitor + per-monitor DPI.
 
 ## Phase 3 — Installer / manager UI

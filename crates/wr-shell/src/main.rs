@@ -29,6 +29,8 @@ use wr_core::config::ConfigStore;
 #[cfg(windows)]
 mod autostart;
 #[cfg(windows)]
+mod surfaces;
+#[cfg(windows)]
 mod wallpaper;
 
 // `ticks % 10 == 0` reads fine; `.is_multiple_of()` would raise our MSRV (1.77).
@@ -64,6 +66,12 @@ fn main() {
     // no-op when unswapped or when this shell is a crash relaunch.
     #[cfg(windows)]
     autostart::start(Arc::clone(&config), opts.autostart_test_filter.clone());
+
+    // Phase 2 child surfaces (ADR 0005): spawn + supervise the taskbar.
+    // Cosmetic like the wallpaper — it may fail or give up without ever
+    // touching the safety harness.
+    #[cfg(windows)]
+    surfaces::start(Arc::clone(&config));
 
     // ADR 0002 mutual supervision: watch the watchdog and relaunch it if it
     // dies (Winlogon won't — AutoRestartShell ignores custom per-user shells).
@@ -276,14 +284,20 @@ mod guardian {
                         }
                         Ok(Some(wr_ipc::ToShell::Shutdown)) => {
                             log::info!("shutdown requested over IPC");
+                            // The taskbar is our child; nobody else will
+                            // reap it once we are gone.
+                            crate::surfaces::shutdown();
                             std::process::exit(0);
                         }
                         Ok(Some(wr_ipc::ToShell::ReloadConfig)) => {
                             log::info!("ReloadConfig received");
                             // Swaps the store (and logs the outcome), then
-                            // nudges the wallpaper to repaint.
+                            // nudges the consumers: wallpaper repaint, and
+                            // the taskbar re-reads the file (its store is in
+                            // another process).
                             config.reload();
                             crate::wallpaper::notify_config_changed();
+                            crate::surfaces::notify_config_changed();
                         }
                         Ok(None) => std::thread::sleep(Duration::from_millis(200)),
                         Err(_) => {
@@ -333,6 +347,8 @@ mod guardian {
 
     /// Last resort with no watchdog to lean on: put explorer back ourselves.
     fn restore_windows_and_exit() -> ! {
+        // Our taskbar must not sit on top of the desktop we are restoring.
+        crate::surfaces::shutdown();
         match wr_core::shell::restore_shell() {
             Ok(outcome) => log::info!("registry restore: {outcome:?}"),
             Err(e) => log::error!("registry restore FAILED: {e:#}"),

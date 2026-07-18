@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 ```
 
 It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
-T5–T12** against the real binaries (no shell swap, no re-logon needed) and
+T5–T13** against the real binaries (no shell swap, no re-logon needed) and
 prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
 Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
 
@@ -27,7 +27,8 @@ reference for what each test means and for running one by hand when debugging.
 - Windows 11 VM, snapshot `clean` taken.
 - Rust (MSVC toolchain) installed in the VM, or copy a release build in.
 - Build: `cargo build --release` → binaries land next to each other in
-  `target\release\` (`wr-watchdog.exe`, `wr-shell.exe`, `wr-installer.exe`).
+  `target\release\` (`wr-watchdog.exe`, `wr-shell.exe`, `wr-taskbar.exe`,
+  `wr-installer.exe`).
 
 ## T0 — Registry backup/restore is reversible (no shell swap yet)
 
@@ -195,6 +196,33 @@ real startup apps are never launched by a test.
    *real* swapped logon, the user's actual startup apps come up, and a crash
    relaunch of the shell does **not** re-run them (the session-marker guard;
    look for "autostart already ran this logon session" in the logs).
+
+## T13 — Taskbar surface supervision  (Phase 2, ADR 0005)
+
+No registry swap needed. Unswapped, the taskbar detects explorer's live
+desktop (`Shell_TrayWnd`) and stays **non-topmost**, so it never covers the
+real taskbar during testing; in a swapped session it is topmost.
+
+1. Start the watchdog plain (default config). ✅ Pass if `wr-taskbar.exe` is
+   running, and the logs show `taskbar launched (pid …)`, `taskbar window up
+   (…)`, and `taskbar painted: color #10101a alpha 224`. (A GPU-less VM logs
+   `using WARP (software) rendering` — that is fine.)
+2. Kill `wr-taskbar.exe` from Task Manager. ✅ Pass if the shell logs
+   `taskbar exited unexpectedly` / `relaunching taskbar` and a new
+   `wr-taskbar.exe` pid appears within a second or two.
+3. Crash-loop: set `WR_TASKBAR_TEST_ARGS=--crash-after=1` and start a fresh
+   pair. ✅ Pass if after 4 exits within 20 s the shell logs
+   `taskbar crash-loop … giving up on the taskbar` and — the point of the
+   policy — `wr-shell.exe` and `wr-watchdog.exe` keep running. A broken
+   taskbar degrades the desktop; it must never take it down.
+4. Config opt-out: write `[taskbar]` / `enabled = false` and start a fresh
+   pair. ✅ Pass if the shell logs `taskbar disabled in config; not spawning
+   it` and no `wr-taskbar.exe` appears.
+5. What the harness can't cover (verify at the manual T3 release pass): the
+   bar is actually *visible* (bottom of the primary monitor, rounded,
+   translucent, clock on the right), and after `Win + Ctrl + F1` the restored
+   explorer desktop has **no WinRestyle bar left on screen** (recovery paths
+   sweep `wr-taskbar.exe`).
 
 ## Resolved Phase 0 question
 

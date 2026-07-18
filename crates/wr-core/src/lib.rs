@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod guardian;
+pub mod process;
 pub mod shell;
 
 /// The named pipe used to coordinate watchdog ⇄ shell ⇄ installer.
@@ -13,3 +14,20 @@ pub const PIPE_NAME: &str = r"\\.\pipe\winrestyle";
 
 /// Emergency-restore hotkey, documented in one place so UI and watchdog agree.
 pub const EMERGENCY_HOTKEY_LABEL: &str = "Win + Ctrl + F1";
+
+/// Executable names, shared so supervision and stray sweeps never drift.
+pub const SHELL_EXE: &str = "wr-shell.exe";
+pub const TASKBAR_EXE: &str = "wr-taskbar.exe";
+
+/// Window class of the taskbar's top-level window. The shell finds the bar by
+/// this class to forward config-change notifications.
+///
+/// Deliberately NOT `Shell_TrayWnd` (yet): that class is how recovery paths
+/// detect a live *explorer* desktop (`shell::desktop_shell_running`). Claiming
+/// it is the Phase 2 tray-hosting milestone and needs that check reworked
+/// first (see ADR 0005).
+pub const TASKBAR_WINDOW_CLASS: &str = "WinRestyleTaskbar";
+
+/// Name of the registered window message (`RegisterWindowMessageW`) the shell
+/// posts to surface windows after a config reload.
+pub const CONFIG_CHANGED_MESSAGE: &str = "WinRestyleConfigChanged";
