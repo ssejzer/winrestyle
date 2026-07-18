@@ -65,6 +65,12 @@ mod win {
     const CRASH_LIMIT: usize = 3;
     const CRASH_WINDOW: Duration = Duration::from_secs(20);
 
+    /// A healthy pipe thread stamps `pipe_alive` every ~200ms; if it hasn't
+    /// within this bound, its heartbeat bookkeeping cannot be trusted. Kept
+    /// well under `wr_ipc::HEARTBEAT_TIMEOUT` (see the T9 race note below) and
+    /// generous enough for scheduling stalls.
+    const PIPE_OBSERVING_BOUND: Duration = Duration::from_secs(2);
+
     /// Shared guardian state, cloneable across the supervisor thread and the
     /// hotkey handler on the main thread.
     #[derive(Clone)]
@@ -207,22 +213,27 @@ mod win {
                                 .is_some_and(|t| t.elapsed() > wr_ipc::HEARTBEAT_TIMEOUT);
                             if hung {
                                 // Stale heartbeats only incriminate the shell
-                                // if the pipe thread recording them is alive.
-                                // If that thread is wedged too, *we* are the
-                                // hung process: exit, so the shell's monitor
-                                // relaunches a fresh watchdog (ADR 0003 —
-                                // convert hangs to deaths). Killing the shell
-                                // here would shoot the innocent party and
-                                // leave a wedged watchdog in charge.
-                                let pipe_wedged = g
+                                // if the pipe thread recording them is alive
+                                // *right now* — a healthy one stamps every
+                                // ~200ms even with no traffic. Demanding it be
+                                // stale by the full heartbeat timeout instead
+                                // loses the race by design: the last beat is
+                                // always up to a beat interval older than the
+                                // last stamp, so "beats stale" fires first and
+                                // the innocent shell gets shot (seen in T9).
+                                // If the pipe thread is not observing, *we*
+                                // are the hung process: exit, so the shell's
+                                // monitor relaunches a fresh watchdog
+                                // (ADR 0003 — convert hangs to deaths).
+                                let pipe_observing = g
                                     .pipe_alive
                                     .lock()
                                     .unwrap()
-                                    .is_some_and(|t| t.elapsed() > wr_ipc::HEARTBEAT_TIMEOUT);
-                                if pipe_wedged {
+                                    .is_some_and(|t| t.elapsed() < PIPE_OBSERVING_BOUND);
+                                if !pipe_observing {
                                     log::error!(
-                                        "own pipe thread is wedged (heartbeats stale on both \
-                                         sides); exiting so the shell relaunches a fresh watchdog"
+                                        "own pipe thread stopped observing; exiting so the \
+                                         shell relaunches a fresh watchdog"
                                     );
                                     std::process::exit(2);
                                 }
