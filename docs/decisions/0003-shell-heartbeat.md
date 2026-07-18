@@ -86,6 +86,13 @@ whose job is to block in `GetMessageW`; revisit if it ever occurs in practice.
 
 ## Verification (VM)
 
+Automated in `scripts\vm-test.ps1`. **Both pass** (2026-07-18, Win11 22H2,
+suite green 11/11). Getting there took three runs: automated T9 found the
+partial-hang flaw (amendment above), then the timing race in its first fix —
+the staleness-vs-staleness comparison loses by up to a beat interval, hence
+the 2 s *freshness* bound (`PIPE_OBSERVING_BOUND`); automated T7 found the
+one-shot monitor gap (ADR 0002 amendment).
+
 - **T8 — hung shell:** `wr-shell --hang-heartbeat-after=N` keeps the process
   alive but silent; the watchdog must kill and relaunch it within ~6 s.
 - **T9 — hung watchdog:** `wr-watchdog --ack-hang-after=N` freezes the pipe

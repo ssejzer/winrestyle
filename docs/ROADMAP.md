@@ -33,8 +33,12 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       client lands with the Phase 3 UI; `RequestRestore` is already served).
 - [x] `ShellHeartbeat` over `wr-ipc` — upgraded ADR 0002's process-handle
       mutual supervision to hang detection (both directions) and removed the
-      PID-reuse race. (ADR 0003; VM tests T8/T9 pending.)
-- [ ] Config load from `%APPDATA%\WinRestyle\config.toml`.
+      PID-reuse race. (ADR 0003 + amendments; automated suite green 11/11,
+      2026-07-18.)
+- [x] Automated VM test harness (`scripts\vm-test.ps1`): T0–T2, T5–T9 run
+      hands-off against release binaries; only T3 stays manual.
+- [ ] Config load from `%APPDATA%\WinRestyle\config.toml`. **← next up**
+      (wire to the `ReloadConfig` IPC message, which is already plumbed).
 - [ ] **Logon autostart** — run what explorer would at shell start so the user's
       session isn't degraded: `Run` / `RunOnce` keys (HKCU + HKLM) and the
       per-user + common Startup folders, plus session helpers like `rdpclip.exe`

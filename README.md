@@ -65,11 +65,28 @@ rustup target add x86_64-pc-windows-msvc
 cargo build --workspace
 ```
 
+## Testing
+
+An automated harness (run inside the VM) covers the whole safety matrix —
+crashes, kills, hangs, crash-loops, registry round-trips — against the real
+binaries:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
+```
+
+See [`docs/TESTING.md`](docs/TESTING.md). Only one test (real logon swap +
+emergency hotkey) remains manual, once per release.
+
 ## Status
 
-🚧 **Phase 0 — safety harness & shell-swap spike.** No UI yet; the goal is to
-prove the swap → crash → restore loop is bulletproof. Follow the
-[roadmap](docs/ROADMAP.md).
+🚧 **Phase 1 — minimal shell.** The Phase 0 safety harness is complete and
+fully validated in a Win11 VM (automated suite green): mutual watchdog ⇄ shell
+supervision, heartbeat-based hang detection over the named pipe, crash-loop
+caps, and mid-session `explorer.exe` restore all work. No UI yet — next up:
+config loading, then the first painted pixels (wallpaper). Follow the
+[roadmap](docs/ROADMAP.md); design decisions live in
+[`docs/decisions/`](docs/decisions/).
 
 ## License
 

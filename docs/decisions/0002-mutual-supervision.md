@@ -73,7 +73,9 @@ risk for every generation after the first.
 
 ## Verification
 
-Revised T5–T7 **all pass** (2026-07-18, Win11 22H2 build 22621, Hyper-V):
+Revised T5–T7 **all pass** (2026-07-18, Win11 22H2 build 22621, Hyper-V;
+re-validated by the automated suite after the cross-generation amendment —
+`scripts\vm-test.ps1`, 11/11):
 killing either process brings the pair back; repeated kills trip the runaway
 cap and the desktop self-restores to explorer. Note the cap's restore is
 *permanent by design* — it rewrites `HKCU Shell`, so the next logon is stock

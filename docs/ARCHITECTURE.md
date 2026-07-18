@@ -69,6 +69,15 @@ apply` points `HKCU\…\Shell` at `wr-watchdog.exe`, and the watchdog spawns
 running the moment the session starts — pointing `Shell` at `wr-shell` directly
 would log the user into a blank desktop with no hotkey and no supervisor.
 
+**The watchdog itself is supervised by the shell** (mutual supervision,
+ADR 0002): the shell relaunches a dead watchdog — across generations, with a
+runaway cap — and the relaunched watchdog's stray sweep converges the pair back
+to exactly one of each. Hangs are detected by the pipe heartbeat (ADR 0003) and
+*converted into deaths*; inside the watchdog, per-thread liveness stamps ensure
+a partially hung watchdog blames itself, not the shell. Recovery is idempotent:
+`explorer.exe` is only launched if no live desktop shell (`Shell_TrayWnd`) is
+already on screen.
+
 > **Concurrency invariant:** the watchdog must never hold the child-handle lock
 > across a blocking `wait()`. The recovery path (hotkey / crash-loop) needs that
 > same lock to terminate a *running* shell; holding it across a blocking wait

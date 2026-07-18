@@ -117,8 +117,20 @@ try {
 
     if (-not $SkipPull) {
         Write-Section 'git pull'
+        # PowerShell parses the whole script before running it, so a pull that
+        # updates this file does not affect the *current* execution - assertions
+        # would lag one commit behind the code. Detect that and re-exec.
+        $selfBefore = (Get-FileHash $PSCommandPath).Hash
         git pull --ff-only
         if ($LASTEXITCODE -ne 0) { throw 'git pull failed' }
+        if ((Get-FileHash $PSCommandPath).Hash -ne $selfBefore) {
+            Write-Host 'Test script was updated by the pull; re-running the new version...' -ForegroundColor Yellow
+            $forward = @('-SkipPull')
+            if ($SkipBuild) { $forward += '-SkipBuild' }
+            if ($SkipUnit)  { $forward += '-SkipUnit' }
+            & powershell -ExecutionPolicy Bypass -File $PSCommandPath @forward
+            exit $LASTEXITCODE
+        }
     }
     if (-not $SkipBuild) {
         Write-Section 'cargo build --release'
