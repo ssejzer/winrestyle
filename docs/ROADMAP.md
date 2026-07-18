@@ -27,10 +27,10 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 
 ## Phase 1 — Minimal shell ⭐ (current)
 
-- [ ] `wr-shell` paints desktop background / wallpaper — **implemented**
-      (bottom-most virtual-screen window, config color + optional WIC image,
-      repaint on `ReloadConfig`). Check off once automated T11 passes a VM run
-      and the visual half is eyeballed at the next manual T3.
+- [x] `wr-shell` paints desktop background / wallpaper (bottom-most
+      virtual-screen window, config color + optional WIC image, repaint on
+      `ReloadConfig`; automated T11 green 2026-07-18 — logs only; eyeball the
+      visual half at the next manual T3).
 - [ ] `wr-shell` spawns and supervises child surfaces (the taskbar).
 - [x] `wr-ipc` named-pipe protocol wired across watchdog ⇄ shell (installer
       client lands with the Phase 3 UI; `RequestRestore` is already served).
@@ -50,6 +50,9 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       **individually opt-in/out via config**; default mirrors Windows behavior.
       (Scheduled-task "at logon" items are launched by Task Scheduler, not the
       shell, so they still fire — not our responsibility.)
+      **Implemented** (ADR 0004: HKLM RunOnce skipped, once-per-logon-session
+      guard, unswapped-session guard). Check off once automated T12 passes a VM
+      run; the real-logon half gets verified at the next manual T3.
 
 ## Phase 2 — Taskbar (flagship)
 

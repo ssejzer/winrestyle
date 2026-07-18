@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 ```
 
 It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
-T5–T11** against the real binaries (no shell swap, no re-logon needed) and
+T5–T12** against the real binaries (no shell swap, no re-logon needed) and
 prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
 Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
 
@@ -172,6 +172,27 @@ Same setup as T10 (the harness runs them as one scenario).
    events via logs, not pixels. The visual check — wallpaper actually visible,
    image file rendering, fallback color on a broken image path — happens
    during the manual T3 release pass.
+
+## T12 — Logon autostart with per-entry opt-out  (Phase 1, ADR 0004)
+
+No registry swap needed. The `--autostart-test-filter=<substr>` test flag (via
+`WR_SHELL_TEST_ARGS`) makes the shell run autostart even though explorer is on
+screen, but only for entries whose id contains the substring — the session's
+real startup apps are never launched by a test.
+
+1. Create disposable HKCU `Run` + `RunOnce` values named `WinRestyleT12*`
+   whose commands write marker files.
+2. Start the watchdog with `WR_SHELL_TEST_ARGS=--autostart-test-filter=WinRestyleT12`.
+3. ✅ Pass if both markers appear, and the `RunOnce` value is *deleted* from
+   the registry (the Windows RunOnce contract).
+4. Write `[autostart]` / `disabled = ["hkcu-run:WinRestyleT12"]` to the config
+   and start a fresh pair. ✅ Pass if the shell logs
+   `autostart: skipped hkcu-run:WinRestyleT12 (disabled in config)` and the
+   entry does not run.
+5. What the harness can't cover (verify at the manual T3 release pass): in a
+   *real* swapped logon, the user's actual startup apps come up, and a crash
+   relaunch of the shell does **not** re-run them (the session-marker guard;
+   look for "autostart already ran this logon session" in the logs).
 
 ## Resolved Phase 0 question
 

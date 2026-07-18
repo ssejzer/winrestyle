@@ -6,8 +6,9 @@
 .DESCRIPTION
   Automates docs/TESTING.md: T0 (registry round-trip), T1/T2 (shell crash /
   crash-loop), T5/T6/T7 (watchdog kill / convergence / runaway cap),
-  T8/T9 (hung shell / hung watchdog via the ADR 0003 heartbeat), and
-  T10/T11 (config load + hot reload over IPC; wallpaper paint + repaint).
+  T8/T9 (hung shell / hung watchdog via the ADR 0003 heartbeat),
+  T10/T11 (config load + hot reload over IPC; wallpaper paint + repaint), and
+  T12 (logon autostart + config opt-out, ADR 0004).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
   desktop + Win+Ctrl+F1) and the logged-in halves of T4.
@@ -44,6 +45,8 @@ $WinlogonKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon'
 $BackupKey   = 'HKCU:\Software\WinRestyle'
 $ConfigFile  = Join-Path $env:APPDATA 'WinRestyle\config.toml'
 $ConfigBak   = Join-Path $LogDir 'config.toml.bak'
+$RunKey      = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$RunOnceKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
 
 # T10 overwrites the user's real config.toml; these drive the byte-identical
 # restore in the finally block even if the test dies halfway.
@@ -293,9 +296,51 @@ try {
     Record 'T11 wallpaper paints the configured color at startup' $painted -LogFile $wd.Log
     Record 'T11 wallpaper repaints after a hot reload' $repainted -LogFile $wd.Log
     Reset-TestEnv
+
+    # ---- T12: logon autostart (ADR 0004) -----------------------------------
+    # The shell only sees test entries: --autostart-test-filter bypasses the
+    # "another desktop shell is on screen" guard but restricts launching to
+    # ids containing the marker string, so the VM session's real startup apps
+    # are never touched.
+    Write-Section 'T12: autostart runs Run/RunOnce entries; config opt-out works'
+    $runMarker  = Join-Path $LogDir 't12-run-ran.txt'
+    $onceMarker = Join-Path $LogDir 't12-runonce-ran.txt'
+    Remove-Item $runMarker, $onceMarker -ErrorAction SilentlyContinue
+    New-ItemProperty -Path $RunKey -Name 'WinRestyleT12' `
+        -Value "cmd /c echo ran> `"$runMarker`"" -Force | Out-Null
+    New-ItemProperty -Path $RunOnceKey -Name 'WinRestyleT12Once' `
+        -Value "cmd /c echo ran> `"$onceMarker`"" -Force | Out-Null
+    $env:WR_SHELL_TEST_ARGS = '--autostart-test-filter=WinRestyleT12'
+    $wd = Start-Watchdog -LogName 't12'
+    $ranRun  = Wait-Until { Test-Path $runMarker } 25
+    $ranOnce = Wait-Until { Test-Path $onceMarker } 10
+    $onceDeleted = Wait-Until {
+        -not (Get-ItemProperty $RunOnceKey -Name 'WinRestyleT12Once' -ErrorAction SilentlyContinue)
+    } 10
+    Record 'T12 Run entry launched at shell start' $ranRun -LogFile $wd.Log
+    Record 'T12 RunOnce entry launched and its value deleted' ($ranOnce -and $onceDeleted) `
+        "ran=$ranOnce deleted=$onceDeleted" -LogFile $wd.Log
+    Stop-WrProcesses
+
+    # Opt-out: same entry, disabled via config, fresh shell.
+    Remove-Item $runMarker -ErrorAction SilentlyContinue
+    Set-Content $ConfigFile "[autostart]`ndisabled = [`"hkcu-run:WinRestyleT12`"]"
+    $wd = Start-Watchdog -LogName 't12b'
+    $skipLogged = Wait-Until {
+        (Get-Log $wd.Log) -match 'autostart: skipped hkcu-run:WinRestyleT12 \(disabled in config\)'
+    } 25
+    Start-Sleep -Seconds 2   # would-be launch window
+    $notRun = -not (Test-Path $runMarker)
+    Record 'T12 config opt-out skips the entry' ($skipLogged -and $notRun) `
+        "skipLogged=$skipLogged notRun=$notRun" -LogFile $wd.Log
+    Remove-ItemProperty -Path $RunKey -Name 'WinRestyleT12' -ErrorAction SilentlyContinue
+    Reset-TestEnv
 }
 finally {
     Reset-TestEnv
+    # T12 leftovers must never survive into the user's real logon.
+    Remove-ItemProperty -Path $RunKey -Name 'WinRestyleT12' -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $RunOnceKey -Name 'WinRestyleT12Once' -ErrorAction SilentlyContinue
     if ($script:ConfigTouched) {
         if ($script:HadConfig) { Copy-Item $ConfigBak $ConfigFile -Force }
         else {

@@ -625,6 +625,7 @@ dependencies = [
  "env_logger",
  "log",
  "windows",
+ "winreg",
  "wr-core",
  "wr-ipc",
 ]

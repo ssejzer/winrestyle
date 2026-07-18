@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 use wr_core::config::ConfigStore;
 
 #[cfg(windows)]
+mod autostart;
+#[cfg(windows)]
 mod wallpaper;
 
 // `ticks % 10 == 0` reads fine; `.is_multiple_of()` would raise our MSRV (1.77).
@@ -57,6 +59,11 @@ fn main() {
     // safety harness below.
     #[cfg(windows)]
     wallpaper::start(Arc::clone(&config));
+
+    // Run what explorer would at logon (ADR 0004). Guards inside make this a
+    // no-op when unswapped or when this shell is a crash relaunch.
+    #[cfg(windows)]
+    autostart::start(Arc::clone(&config), opts.autostart_test_filter.clone());
 
     // ADR 0002 mutual supervision: watch the watchdog and relaunch it if it
     // dies (Winlogon won't — AutoRestartShell ignores custom per-user shells).
@@ -348,6 +355,10 @@ struct Options {
     exit_after: Option<Duration>,
     #[cfg_attr(not(windows), allow(dead_code))]
     hang_heartbeat_after: Option<Duration>,
+    /// VM tests only: bypass the autostart guards and launch only entries
+    /// whose id contains this substring (see `autostart` module docs).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    autostart_test_filter: Option<String>,
 }
 
 impl Options {
@@ -360,6 +371,8 @@ impl Options {
                 opts.exit_after = v.parse().ok().map(Duration::from_secs);
             } else if let Some(v) = arg.strip_prefix("--hang-heartbeat-after=") {
                 opts.hang_heartbeat_after = v.parse().ok().map(Duration::from_secs);
+            } else if let Some(v) = arg.strip_prefix("--autostart-test-filter=") {
+                opts.autostart_test_filter = (!v.is_empty()).then(|| v.to_string());
             }
         }
         opts

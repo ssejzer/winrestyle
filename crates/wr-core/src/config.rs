@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub wallpaper: Wallpaper,
+    pub autostart: Autostart,
 }
 
 /// `[wallpaper]` — what the shell paints behind everything.
@@ -49,6 +50,36 @@ impl Default for Wallpaper {
             },
             image: None,
         }
+    }
+}
+
+/// `[autostart]` — what the shell launches at logon in explorer's stead
+/// (ADR 0004). Defaults mirror Windows: everything runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Autostart {
+    /// Master switch. `false` launches nothing at all.
+    pub enabled: bool,
+    /// Entry ids to skip, e.g. `"hkcu-run:OneDrive"`,
+    /// `"startup-common:foo.lnk"`, `"session:rdpclip"`. Case-insensitive.
+    /// The shell logs every entry's id, so the list can be built from logs
+    /// until the Phase 3 manager UI exists.
+    pub disabled: Vec<String>,
+}
+
+impl Default for Autostart {
+    fn default() -> Self {
+        Autostart {
+            enabled: true,
+            disabled: Vec::new(),
+        }
+    }
+}
+
+impl Autostart {
+    /// Should this entry launch? Case-insensitive on the id.
+    pub fn allows(&self, id: &str) -> bool {
+        self.enabled && !self.disabled.iter().any(|d| d.eq_ignore_ascii_case(id))
     }
 }
 
@@ -223,6 +254,27 @@ mod tests {
             assert_eq!(config.wallpaper.image, None, "{text:?}");
         }
         assert_eq!(toml::from_str::<Config>("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn autostart_defaults_mirror_windows() {
+        let autostart = toml::from_str::<Config>("").unwrap().autostart;
+        assert!(autostart.enabled);
+        assert!(autostart.allows("hkcu-run:Anything"));
+    }
+
+    #[test]
+    fn autostart_disabled_list_is_case_insensitive() {
+        let config: Config =
+            toml::from_str("[autostart]\ndisabled = [\"HKCU-Run:OneDrive\"]\n").unwrap();
+        assert!(!config.autostart.allows("hkcu-run:onedrive"));
+        assert!(config.autostart.allows("hkcu-run:other"));
+    }
+
+    #[test]
+    fn autostart_master_switch_blocks_everything() {
+        let config: Config = toml::from_str("[autostart]\nenabled = false\n").unwrap();
+        assert!(!config.autostart.allows("hkcu-run:anything"));
     }
 
     #[test]
