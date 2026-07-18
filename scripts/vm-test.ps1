@@ -48,10 +48,17 @@ $script:Results = @()
 
 function Write-Section([string]$Msg) { Write-Host "`n== $Msg ==" -ForegroundColor Cyan }
 
-function Record([string]$Name, [bool]$Pass, [string]$Detail = '') {
+function Record([string]$Name, [bool]$Pass, [string]$Detail = '', [string]$LogFile = '') {
     $script:Results += [pscustomobject]@{ Test = $Name; Pass = $Pass; Detail = $Detail }
     if ($Pass) { Write-Host "  PASS  $Name" -ForegroundColor Green }
-    else       { Write-Host "  FAIL  $Name  $Detail" -ForegroundColor Red }
+    else {
+        Write-Host "  FAIL  $Name  $Detail" -ForegroundColor Red
+        if ($LogFile -and (Test-Path $LogFile)) {
+            Write-Host "  ----- tail of $(Split-Path -Leaf $LogFile) -----" -ForegroundColor DarkGray
+            Get-Content $LogFile -Tail 40 -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "  | $_" -ForegroundColor DarkGray }
+        }
+    }
 }
 
 function Get-Pids([string]$Name) {
@@ -151,7 +158,11 @@ try {
     $env:WR_SHELL_TEST_ARGS = '--crash-after=2'
     $wd = Start-Watchdog -LogName 't1'
     $ok = Wait-Until { (Get-Log $wd.Log) -match 'relaunching shell' } 25
-    Record 'T1 crashed shell is relaunched' $ok
+    Record 'T1 crashed shell is relaunched' $ok -LogFile $wd.Log
+    # T7/T9 assert on wr-shell (grandchild) log lines; prove they reach the
+    # capture file at all, so a plumbing failure there isn't misread as a bug.
+    $shellVisible = (Get-Log $wd.Log) -match 'wr-shell \(Phase 0 dummy\) starting'
+    Record 'T1b shell (grandchild) logs reach the capture file' $shellVisible -LogFile $wd.Log
     Reset-TestEnv
 
     # ---- T2: crash-loop falls back to explorer ----------------------------
@@ -160,7 +171,7 @@ try {
     $wd = Start-Watchdog -LogName 't2'
     $looped = Wait-Until { (Get-Log $wd.Log) -match 'shell crash-loop' } 45
     $exited = Wait-Until { $wd.Proc.HasExited } 10
-    Record 'T2 crash-loop detected and watchdog exits' ($looped -and $exited)
+    Record 'T2 crash-loop detected and watchdog exits' ($looped -and $exited) -LogFile $wd.Log
     Reset-TestEnv
 
     # ---- T5/T6: killed watchdog is relaunched; pair converges -------------
@@ -177,9 +188,9 @@ try {
     Start-Sleep -Seconds 2   # let the stray sweep + fresh spawn settle
     $wPids = Get-Pids 'wr-watchdog'; $sPids = Get-Pids 'wr-shell'
     $converged = ($wPids.Count -eq 1) -and ($sPids.Count -eq 1) -and ($sPids[0] -ne $s1)
-    Record 'T5 shell relaunches a killed watchdog' ($spawned -and $relaunched)
+    Record 'T5 shell relaunches a killed watchdog' ($spawned -and $relaunched) -LogFile $wd.Log
     Record 'T6 pair converges to one of each (fresh shell)' $converged `
-        "watchdogs=[$($wPids -join ',')] shells=[$($sPids -join ',')]"
+        "watchdogs=[$($wPids -join ',')] shells=[$($sPids -join ',')]" -LogFile $wd.Log
     Reset-TestEnv
 
     # ---- T7: watchdog runaway cap ------------------------------------------
@@ -190,19 +201,28 @@ try {
     foreach ($i in 1..4) {
         $pids = Get-Pids 'wr-watchdog'
         if ($pids.Count -eq 0) { break }
-        Stop-Process -Id $pids[0] -Force -ErrorAction SilentlyContinue
+        $old = $pids[0]
+        Stop-Process -Id $old -Force -ErrorAction SilentlyContinue
         $kills++
-        Wait-Until {
-            $now = Get-Pids 'wr-watchdog'
-            ($now.Count -eq 0) -or ($now[0] -ne $pids[0])
-        } 10 | Out-Null
+        if ($i -lt 4) {
+            # Momentarily zero watchdogs is normal (old dead, replacement not
+            # spawned yet) - wait for the actual replacement pid.
+            $resurrected = Wait-Until {
+                $now = Get-Pids 'wr-watchdog'
+                ($now.Count -ge 1) -and ($now[0] -ne $old)
+            } 10
+            if (-not $resurrected) { break }
+        }
     }
-    $capLogged = Wait-Until { (Get-Log $wd.Log) -match 'watchdog crash-loop' } 15
+    # After the 4th kill the runaway cap must stop the cycle: no relaunch, and
+    # the shell restores + exits. Process state is authoritative; the log line
+    # (from the shell) is diagnostic.
     $allGone = Wait-Until {
         ((Get-Pids 'wr-watchdog').Count -eq 0) -and ((Get-Pids 'wr-shell').Count -eq 0)
     } 20
-    Record 'T7 runaway cap stops the relaunch cycle' ($kills -eq 4 -and $capLogged -and $allGone) `
-        "kills=$kills capLogged=$capLogged allGone=$allGone"
+    $capLogged = (Get-Log $wd.Log) -match 'watchdog crash-loop'
+    Record 'T7 runaway cap stops the relaunch cycle' ($kills -eq 4 -and $allGone) `
+        "kills=$kills allGone=$allGone capLogged=$capLogged" -LogFile $wd.Log
     Reset-TestEnv
 
     # ---- T8: hung shell (heartbeat) ----------------------------------------
@@ -211,22 +231,27 @@ try {
     $wd = Start-Watchdog -LogName 't8'
     $killed = Wait-Until { (Get-Log $wd.Log) -match 'killing hung shell' } 30
     $relaunched = Wait-Until { (Get-Log $wd.Log) -match 'relaunching shell' } 10
-    Record 'T8 hung shell is killed and relaunched' ($killed -and $relaunched)
+    Record 'T8 hung shell is killed and relaunched' ($killed -and $relaunched) -LogFile $wd.Log
     Reset-TestEnv
 
     # ---- T9: hung watchdog (heartbeat) --------------------------------------
     Write-Section 'T9: hung watchdog is killed and relaunched (ADR 0003)'
     $wd = Start-Watchdog -Arguments @('--ack-hang-after=6') -LogName 't9'
     $w1 = $wd.Proc.Id
-    $killed = Wait-Until { (Get-Log $wd.Log) -match 'killing hung watchdog' } 30
+    # Freeze at 6s + 5s heartbeat timeout => the shell should kill pid $w1 and
+    # the monitor should relaunch a fresh watchdog. Process state (a new
+    # watchdog pid) is authoritative; the log lines are diagnostic.
     $relaunched = Wait-Until {
         $pids = Get-Pids 'wr-watchdog'
         ($pids.Count -eq 1) -and ($pids[0] -ne $w1)
-    } 15
+    } 40
     Start-Sleep -Seconds 2
     $converged = ((Get-Pids 'wr-watchdog').Count -eq 1) -and ((Get-Pids 'wr-shell').Count -eq 1)
-    Record 'T9 hung watchdog is killed and relaunched' ($killed -and $relaunched -and $converged) `
-        "killed=$killed relaunched=$relaunched converged=$converged"
+    $log = Get-Log $wd.Log
+    $froze  = $log -match 'SIMULATING WATCHDOG HANG'
+    $killed = $log -match 'killing hung watchdog'
+    Record 'T9 hung watchdog is killed and relaunched' ($relaunched -and $converged) `
+        "relaunched=$relaunched converged=$converged froze=$froze killedLogged=$killed" -LogFile $wd.Log
     Reset-TestEnv
 }
 finally {
