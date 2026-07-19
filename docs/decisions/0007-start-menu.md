@@ -85,9 +85,12 @@ Windows code can only be *seen* at a manual T3.
 - Automated **T17** (VM harness, unswapped): the bar logs the Start chip's
   geometry; the harness posts `WM_LBUTTONDOWN` at it and asserts
   `start menu opened: N apps`, then posts Esc to the menu window and asserts
-  `start menu closed`.
-- **Manual, next T3:** the menu's look, type-to-filter, Enter/click launching,
-  click-away dismissal, and behavior in a swapped session.
+  `start menu closed`. **Suite 32/32, 2026-07-19.**
+- **Manual — passed 2026-07-19, in a live swapped session:** the menu rendered
+  above the bar (search hint, hover highlight, scrollbar), listed 69 apps from
+  both Programs roots, filtered, and launching an entry worked end to end
+  (`start menu launch: …\Computer Management.lnk`, the window got a taskbar
+  button, the menu dismissed). Open/close logging matched the T17 signature.
 
 ## Consequences
 

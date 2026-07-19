@@ -13,8 +13,10 @@
   ADR 0005), T14 (window buttons track opened/closed windows), T15
   (taskbar extras: pinned apps incl. a real click-to-launch, backdrop +
   date config, single-bar startup, tray host gated off while unswapped),
-  T16 (Phase 3 installer trial-run primitive: wr-shell --selftest), and
-  T17 (Phase 4 start menu: Start-chip click opens it, Esc closes it).
+  T16 (Phase 3 installer trial-run primitive: wr-shell --selftest),
+  T17 (Phase 4 start menu: Start-chip click opens it, Esc closes it), and
+  T18 (live activate/deactivate, ADR 0008 - swaps THIS session's desktop
+  and puts it back, no logon).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
   desktop + Win+Ctrl+F1), the logged-in halves of T4, the manager *window*
@@ -34,12 +36,18 @@
   Don't rebuild (reuse the existing release binaries).
 .PARAMETER SkipUnit
   Don't run `cargo test`.
+.PARAMETER Tests
+  Run only the named tests, comma/space separated, wildcards allowed:
+  -Tests 'T17'   -Tests 'T13,T17'   -Tests 'T1?'. Default: everything.
+  Combined sections match either id (T5/T6 runs for 'T5' or 'T6'). For a
+  quick iteration loop: -SkipPull -SkipBuild -SkipUnit -Tests T17.
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipPull,
     [switch]$SkipBuild,
-    [switch]$SkipUnit
+    [switch]$SkipUnit,
+    [string]$Tests = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -112,6 +120,25 @@ function Wait-Until([scriptblock]$Condition, [int]$TimeoutSec = 15) {
     return $false
 }
 
+# -Tests filter: empty runs everything; sections pass every id they cover.
+$TestFilter = @($Tests -split '[,\s]+' | Where-Object { $_ })
+function Test-Wanted([string[]]$Ids) {
+    if ($TestFilter.Count -eq 0) { return $true }
+    foreach ($id in $Ids) {
+        foreach ($want in $TestFilter) { if ($id -like $want) { return $true } }
+    }
+    return $false
+}
+
+# Win32 helpers for tests that post real messages at our windows (T15, T17).
+# Defined unconditionally so any -Tests subset can use them.
+Add-Type -Namespace WRTest -Name U32 -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
+[DllImport("user32.dll")]
+public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+'@
+
 # env_logger writes to stderr; children (wr-shell, and any watchdog *it*
 # relaunches) inherit the handle, so one file collects the whole family's logs.
 function Start-Watchdog([string[]]$Arguments = @(), [string]$LogName = 'watchdog') {
@@ -151,6 +178,7 @@ try {
             $forward = @('-SkipPull')
             if ($SkipBuild) { $forward += '-SkipBuild' }
             if ($SkipUnit)  { $forward += '-SkipUnit' }
+            if ($Tests)     { $forward += @('-Tests', $Tests) }
             & powershell -ExecutionPolicy Bypass -File $PSCommandPath @forward
             exit $LASTEXITCODE
         }
@@ -170,7 +198,15 @@ try {
 
     Reset-TestEnv
 
+    # Any section may rewrite config.toml; snapshot it once, unconditionally,
+    # so the finally block restores it byte-for-byte no matter which -Tests
+    # subset ran (T10 used to own this, but T10 can be filtered out now).
+    $script:HadConfig = Test-Path $ConfigFile
+    if ($script:HadConfig) { Copy-Item $ConfigFile $ConfigBak -Force }
+    $script:ConfigTouched = $true
+
     # ---- T0: registry backup/restore round-trip --------------------------
+    if (Test-Wanted 'T0') {
     Write-Section 'T0: registry backup/restore round-trip'
     if (Test-Path $BackupKey) {
         Write-Warning 'stale WinRestyle backup found - restoring first'
@@ -185,8 +221,10 @@ try {
     Record 'T0 apply points Shell at the watchdog' ($applied -like '*wr-watchdog*') "Shell=$applied"
     Record 'T0 restore returns the original value' (($after -eq $before) -and $backupGone) `
         "before=[$before] after=[$after] backupGone=$backupGone"
+    }
 
     # ---- T1: crashed shell is relaunched ----------------------------------
+    if (Test-Wanted 'T1') {
     Write-Section 'T1: watchdog relaunches a crashed shell'
     $env:WR_SHELL_TEST_ARGS = '--crash-after=2'
     $wd = Start-Watchdog -LogName 't1'
@@ -197,8 +235,10 @@ try {
     $shellVisible = (Get-Log $wd.Log) -match 'wr-shell \(Phase 1 minimal\) starting'
     Record 'T1b shell (grandchild) logs reach the capture file' $shellVisible -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T2: crash-loop falls back to explorer ----------------------------
+    if (Test-Wanted 'T2') {
     Write-Section 'T2: shell crash-loop falls back to explorer'
     $env:WR_SHELL_TEST_ARGS = '--crash-after=1'
     $wd = Start-Watchdog -LogName 't2'
@@ -206,8 +246,10 @@ try {
     $exited = Wait-Until { $wd.Proc.HasExited } 10
     Record 'T2 crash-loop detected and watchdog exits' ($looped -and $exited) -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T5/T6: killed watchdog is relaunched; pair converges -------------
+    if (Test-Wanted 'T5', 'T6') {
     Write-Section 'T5/T6: killed watchdog is relaunched by the shell'
     $wd = Start-Watchdog -LogName 't5'
     $spawned = Wait-Until { (Get-Pids 'wr-shell').Count -eq 1 } 10
@@ -225,8 +267,10 @@ try {
     Record 'T6 pair converges to one of each (fresh shell)' $converged `
         "watchdogs=[$($wPids -join ',')] shells=[$($sPids -join ',')]" -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T7: watchdog runaway cap ------------------------------------------
+    if (Test-Wanted 'T7') {
     Write-Section 'T7: repeated watchdog kills trip the runaway cap'
     $wd = Start-Watchdog -LogName 't7'
     Wait-Until { (Get-Pids 'wr-shell').Count -eq 1 } 10 | Out-Null
@@ -268,8 +312,10 @@ try {
     Record 'T7 runaway cap stops the relaunch cycle' ($kills -eq 4 -and $allGone) `
         "kills=$kills allGone=$allGone capLogged=$capLogged" -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T8: hung shell (heartbeat) ----------------------------------------
+    if (Test-Wanted 'T8') {
     Write-Section 'T8: hung shell is killed and relaunched (ADR 0003)'
     $env:WR_SHELL_TEST_ARGS = '--hang-heartbeat-after=3'
     $wd = Start-Watchdog -LogName 't8'
@@ -277,8 +323,10 @@ try {
     $relaunched = Wait-Until { (Get-Log $wd.Log) -match 'relaunching shell' } 10
     Record 'T8 hung shell is killed and relaunched' ($killed -and $relaunched) -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T9: hung watchdog (heartbeat) --------------------------------------
+    if (Test-Wanted 'T9') {
     Write-Section 'T9: hung watchdog is killed and relaunched (ADR 0003)'
     $wd = Start-Watchdog -Arguments @('--ack-hang-after=6') -LogName 't9'
     $w1 = $wd.Proc.Id
@@ -297,12 +345,11 @@ try {
     Record 'T9 hung watchdog is killed and relaunched' ($relaunched -and $converged) `
         "relaunched=$relaunched converged=$converged froze=$froze killedLogged=$killed" -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T10/T11: config load + hot reload + wallpaper ---------------------
+    if (Test-Wanted 'T10', 'T11') {
     Write-Section 'T10/T11: config load + hot reload; wallpaper paints and repaints'
-    $script:HadConfig = Test-Path $ConfigFile
-    if ($script:HadConfig) { Copy-Item $ConfigFile $ConfigBak -Force }
-    $script:ConfigTouched = $true
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ConfigFile) | Out-Null
     Set-Content $ConfigFile "[wallpaper]`ncolor = `"#112233`""
     # The flag makes the watchdog send ReloadConfig every 3s (nothing sends it
@@ -319,8 +366,10 @@ try {
     Record 'T11 wallpaper paints the configured color at startup' $painted -LogFile $wd.Log
     Record 'T11 wallpaper repaints after a hot reload' $repainted -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T12: logon autostart (ADR 0004) -----------------------------------
+    if (Test-Wanted 'T12') {
     # The shell only sees test entries: --autostart-test-filter bypasses the
     # "another desktop shell is on screen" guard but restricts launching to
     # ids containing the marker string, so the VM session's real startup apps
@@ -362,8 +411,10 @@ try {
         "skipLogged=$skipLogged notRun=$notRun" -LogFile $wd.Log
     Remove-ItemProperty -Path $RunKey -Name 'WinRestyleT12' -ErrorAction SilentlyContinue
     Reset-TestEnv
+    }
 
     # ---- T13: taskbar surface supervision (ADR 0005) -----------------------
+    if (Test-Wanted 'T13') {
     # Unswapped, the taskbar detects explorer's live desktop and stays
     # non-topmost, so this never covers the VM's real taskbar. Rendering is
     # asserted via logs (like T11); visuals are eyeballed at the manual T3.
@@ -410,8 +461,10 @@ try {
     Record 'T13 config opt-out never spawns the taskbar' ($skipped -and $noTaskbar) `
         "skipped=$skipped noTaskbar=$noTaskbar" -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T14: window buttons track open windows -----------------------------
+    if (Test-Wanted 'T14') {
     # A WScript.Shell popup gives a top-level, unowned, titled dialog with a
     # title we control - deterministic and locale-independent (notepad's
     # title is localized; consoles may open in Windows Terminal).
@@ -428,8 +481,10 @@ try {
     Record 'T14 new window becomes a taskbar button' $added -LogFile $wd.Log
     Record 'T14 closed window drops its button' $removed -LogFile $wd.Log
     Reset-TestEnv
+    }
 
     # ---- T15: taskbar extras (pinned, backdrop, date, bars, tray gating) ----
+    if (Test-Wanted 'T15') {
     # Unswapped smoke of the Phase 2 completion slices: the extras config
     # must start cleanly, pin an app (and launch it on a real click, posted
     # as WM_LBUTTONDOWN at the pinned square), apply/report the backdrop,
@@ -463,12 +518,6 @@ try {
     # Click the pinned square. The bar logs its geometry at startup
     # ('pinned[0] chip at x,y WxH (bar-local)') precisely so this test never
     # re-derives layout constants or DPI math.
-    Add-Type -Namespace WRTest -Name U32 -MemberDefinition @'
-[DllImport("user32.dll", CharSet = CharSet.Unicode)]
-public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
-[DllImport("user32.dll")]
-public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
-'@
     # PowerShell marshals $null as String.Empty for string parameters, which
     # would make FindWindowW match on an empty *title* too; [NullString]
     # passes a real NULL so only the class is matched.
@@ -489,8 +538,10 @@ public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, Int
         Where-Object { $preLaunch -notcontains $_.Id } |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Reset-TestEnv
+    }
 
     # ---- T16: installer manager trial-run primitive (Phase 3) ---------------
+    if (Test-Wanted 'T16') {
     # The manager *window* is manual (T3/T16 visual). Its safety-critical
     # pre-swap primitive is automatable: the `wr-shell --selftest` trial run the
     # installer performs before it ever touches the registry must load+validate
@@ -506,8 +557,10 @@ public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, Int
     Record 'T16 shell --selftest validates config and exits 0' $selftestOk `
         "exit=$($proc.ExitCode)" -LogFile $selftestLog
     Reset-TestEnv
+    }
 
     # ---- T17: start menu opens and closes (Phase 4, ADR 0007) ---------------
+    if (Test-Wanted 'T17') {
     # The menu is a window inside wr-taskbar; clicking the Start chip opens it
     # in ALL sessions, so the unswapped suite can drive it. The bar logs the
     # Start chip's geometry at startup ('start chip at x,y WxH (bar-local)');
@@ -539,6 +592,53 @@ public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, Int
     }
     Record 'T17 Esc closes the menu' $closed "menuWnd=$menuWnd" -LogFile $wd.Log
     Reset-TestEnv
+    }
+
+    # ---- T18: live activate / deactivate (no logon; ADR 0008) ---------------
+    # The one automated test that swaps THIS session's desktop for real:
+    # `apply` + `activate` stop explorer and bring the wr family up swapped
+    # (topmost, tray host on); `deactivate` restores the registry, sweeps the
+    # family, and brings explorer back. Runs last so a failure can't disturb
+    # other tests; the finally block relaunches explorer if we die midway.
+    if (Test-Wanted 'T18') {
+    Write-Section 'T18: live activate/deactivate (full session swap, no logon)'
+    Remove-Item $ConfigFile -ErrorAction SilentlyContinue   # defaults
+    $t18log = Join-Path $LogDir 't18-activate.log'
+    & $Installer apply | Out-Null
+    # The spawned watchdog (and its children) inherit stderr, so the whole
+    # family's logs land in the activate log file.
+    $proc = Start-Process -FilePath $Installer -ArgumentList 'activate' -NoNewWindow `
+        -PassThru -Wait -RedirectStandardError $t18log
+    $familyUp = Wait-Until {
+        ((Get-Pids 'wr-watchdog').Count -eq 1) -and
+        ((Get-Pids 'wr-shell').Count -eq 1) -and
+        ((Get-Pids 'wr-taskbar').Count -eq 1)
+    } 20
+    # The swapped-mode signature: topmost bar + tray host on (never true in
+    # the unswapped runs above).
+    $swapped = Wait-Until { (Get-Log $t18log) -match 'taskbar up: .*topmost, tray host active' } 20
+    $explorerGone = $null -eq (Get-Process explorer -ErrorAction SilentlyContinue)
+    Record 'T18 activate swaps the live session (explorer out, wr desktop up)' `
+        (($proc.ExitCode -eq 0) -and $familyUp -and $swapped -and $explorerGone) `
+        "exit=$($proc.ExitCode) family=$familyUp swapped=$swapped explorerGone=$explorerGone" `
+        -LogFile $t18log
+
+    $t18dlog = Join-Path $LogDir 't18-deactivate.log'
+    $proc = Start-Process -FilePath $Installer -ArgumentList 'deactivate' -NoNewWindow `
+        -PassThru -Wait -RedirectStandardError $t18dlog
+    $explorerBack = Wait-Until { $null -ne (Get-Process explorer -ErrorAction SilentlyContinue) } 25
+    $wrGone = Wait-Until {
+        ((Get-Pids 'wr-watchdog').Count -eq 0) -and
+        ((Get-Pids 'wr-shell').Count -eq 0) -and
+        ((Get-Pids 'wr-taskbar').Count -eq 0)
+    } 15
+    $backupGone = -not (Test-Path $BackupKey)
+    Record 'T18 deactivate restores explorer + registry, sweeps the family' `
+        (($proc.ExitCode -eq 0) -and $explorerBack -and $wrGone -and $backupGone) `
+        "exit=$($proc.ExitCode) explorerBack=$explorerBack wrGone=$wrGone backupGone=$backupGone" `
+        -LogFile $t18dlog
+    Reset-TestEnv
+    }
 }
 finally {
     Reset-TestEnv
@@ -566,6 +666,12 @@ finally {
     if (Test-Path $BackupKey) {
         Write-Warning 'WinRestyle registry backup still present - restoring'
         & $Installer restore
+    }
+    # T18 stops explorer; if the run died between activate and deactivate,
+    # put the desktop back (the wr processes were already swept above).
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
+        Write-Warning 'explorer not running - relaunching it'
+        Start-Process explorer.exe
     }
     Pop-Location
 }

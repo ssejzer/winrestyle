@@ -15,7 +15,9 @@
 //!   wr-installer              open the manager window (default)
 //!   wr-installer status       show the current/backed-up shell state
 //!   wr-installer apply        back up + set HKCU Shell (DANGER: VM only)
-//!   wr-installer restore      restore the original shell
+//!   wr-installer activate     swap THIS session onto WinRestyle now (ADR 0008)
+//!   wr-installer deactivate   restore + sweep + bring explorer back now
+//!   wr-installer restore      restore the original shell registry value only
 
 use anyhow::Result;
 
@@ -37,6 +39,8 @@ fn main() -> Result<()> {
         None => gui(),
         Some("status") => cli::status(),
         Some("apply") => cli::apply(),
+        Some("activate") => cli::activate(),
+        Some("deactivate") => cli::deactivate(),
         Some("restore") => cli::restore(),
         Some("gui") => gui(),
         Some("--help" | "-h" | "help") => cli::usage(),

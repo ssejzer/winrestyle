@@ -145,7 +145,7 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       teardown reuses the proven restore + sweep + conditional-explorer path.)
 - [x] **This is where the target UX ships.** (Window visuals verify at T3.)
 
-## Phase 4 — Start menu ⭐ (first slice code complete 2026-07-19; rides next T3)
+## Phase 4 — Start menu ⭐ (first slice VM-validated 2026-07-19)
 
 > A module of `wr-taskbar`, not a separate process (ADR 0007: a second process
 > would need an IPC channel the single-client pipe can't give it, and the menu
@@ -158,9 +158,17 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       gone): shortcut list from the user + machine `Programs` folders (user
       shadows machine, explorer's merge rule), type-to-filter, Up/Down +
       Enter, click-to-launch, wheel scroll + thumb, Esc / click-away /
-      re-click dismissal. Automated **T17** (open via posted click, close via
-      Esc); look + keyboard + swapped-session behavior at the next manual T3.
-      (2026-07-19.)
+      re-click dismissal. Automated **T17**; suite 32/32 + live swapped-session
+      check 2026-07-19 (69 apps listed, filtered, launched Computer
+      Management). (2026-07-19.)
+- [x] **Live activate / deactivate — no re-logon** (ADR 0008):
+      `manager::activate_now` performs the logon transition in-session (sweep →
+      stop explorer → launch watchdog; backs itself out if winlogon relaunches
+      explorer), Undo/`deactivate` now sweeps the whole family (repeatedly —
+      mutual supervision resurrects single-pass survivors) so it sticks live.
+      CLI `activate`/`deactivate`; manager asks "Activate now?" after apply.
+      Automated **T18** swaps the session and puts it back. (2026-07-19;
+      manager dialog flow rides the next T3.)
 - [ ] Row icons (needs an async loader — `SHGetFileInfoW` on shortcut targets
       can block; letter chips until then).
 - [ ] Open via the Win key (needs a keyboard hook).
@@ -172,7 +180,9 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 
 - [ ] Theming engine (`wr-theme`): icons, accent colors, msstyles interop.
 - [ ] Icon packs & themes; live customization UI.
-- [ ] Multi-client IPC pipe → live apply from the manager (ADR 0006 deferral).
+- [ ] Multi-client IPC pipe → live *config re-apply* to a running session
+      (manager → shell; ADR 0006 deferral). Activate/deactivate is already
+      live via process lifecycle (ADR 0008).
 - [ ] Plugin API for third-party components.
 - [ ] Code signing, packaging (MSI/winget), auto-update.
 

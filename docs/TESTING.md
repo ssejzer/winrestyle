@@ -13,9 +13,17 @@ powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 ```
 
 It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
-T5–T16** against the real binaries (no shell swap, no re-logon needed) and
-prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
-Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
+T5–T18** against the real binaries and prints a PASS/FAIL summary. Per-test
+logs land in `target\vm-test-logs\`. Everything runs unswapped except **T18**,
+which (deliberately, last) live-swaps the session's desktop and puts it back.
+Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`, and
+`-Tests` to run a subset instead of the full regression — comma/space
+separated, wildcards allowed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1 `
+    -SkipPull -SkipBuild -SkipUnit -Tests 'T17,T18'
+```
 
 **Still manual, once per release:** **T3** — the real swap + logon + blank
 desktop + `Win + Ctrl + F1` — because it needs a human at the logon screen,
@@ -336,6 +344,12 @@ window itself is Direct2D and can only be *seen* in the VM. So T16 splits:
 
 ## T17 — Start menu  (Phase 4, ADR 0007)
 
+> Last passed 2026-07-19 (suite 32/32), and the manual half was checked live
+> the same day in a **swapped session**: the menu opened over the bar
+> (`start menu opened: 69 apps`), hover + scrollbar rendered, launching an
+> entry logged `start menu launch: …\Computer Management.lnk`, the launched
+> window got a taskbar button, and the menu closed on dismissal.
+
 The menu is a window inside `wr-taskbar` (no new process, no IPC — ADR 0007);
 clicking the Start chip opens it in every session, swapped or not. Its logic is
 unit-tested cross-platform (`wr-taskbar::{apps,startmenu}`: folder merge with
@@ -365,6 +379,25 @@ itself splits like the manager's:
 6. In a **swapped session** (during the T3 pass): the menu opens, lists the
    same apps, and launches them — the Start experience explorer used to
    provide.
+
+## T18 — Live activate / deactivate  (ADR 0008)
+
+The only automated test that swaps the running session's desktop for real —
+which is why it runs **last**. It proves the no-logon path both ways:
+
+1. `wr-installer apply` then `wr-installer activate`. ✅ Pass if explorer is
+   gone, exactly one watchdog + shell + taskbar are running, and the log shows
+   the swapped-mode signature `taskbar up: … topmost, tray host active` (never
+   seen in the unswapped tests).
+2. `wr-installer deactivate`. ✅ Pass if explorer is back, all three WinRestyle
+   processes are swept (repeated sweep — mutual supervision resurrects
+   single-pass survivors), and the registry backup key is gone.
+
+If the harness dies between the two halves, its `finally` block restores the
+registry and relaunches explorer. Manual notes: on a machine where winlogon
+relaunches explorer (`AutoRestartShell` — ADR 0001/T5), `activate` detects the
+returned desktop, backs our processes out, and reports that the restyle will
+activate at the next sign-in instead — verify the message, not a hang.
 
 ## Resolved Phase 0 question
 

@@ -25,10 +25,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TR
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetSystemMetrics, LoadCursorW,
     MessageBoxW, PostQuitMessage, RegisterClassW, SetWindowPos, ShowWindow, CW_USEDEFAULT,
-    IDC_ARROW, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MINMAXINFO, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WHEEL_DELTA, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SIZE,
-    WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    IDC_ARROW, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
+    MINMAXINFO, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WHEEL_DELTA,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 /// `windows-rs` files `WM_MOUSELEAVE` under `UI_Controls`; not worth a whole
@@ -106,7 +106,12 @@ fn build_model(dpi: u32, renderer: Renderer) -> Manager {
 /// A one-line summary of whether WinRestyle is the registered shell right now.
 fn shell_status_line() -> String {
     match wr_core::shell::has_backup() {
-        Ok(true) => "WinRestyle is installed — active after the next logout/login.".to_string(),
+        Ok(true) if wr_core::process::any_named(wr_core::WATCHDOG_EXE) => {
+            "WinRestyle is installed and active in this session.".to_string()
+        }
+        Ok(true) => "WinRestyle is installed — active at the next login (or Restyle Now → \
+                     activate)."
+            .to_string(),
         Ok(false) => "Not installed — the standard Windows shell is active.".to_string(),
         Err(e) => format!("Could not read shell state: {e}"),
     }
@@ -409,17 +414,51 @@ fn do_apply(hwnd: HWND) {
         Err(e) => message_box(hwnd, "Could not apply", &format!("{e:#}"), true),
     }
 
+    // Offer live activation (ADR 0008). Recovery instructions were shown
+    // first, above, so the user has the hotkey before the desktop churns.
+    let mut status = match &outcome {
+        Ok(o) => o.headline.clone(),
+        Err(e) => format!("Apply failed: {e}"),
+    };
+    if outcome.is_ok()
+        && confirm_box(
+            hwnd,
+            "Activate now?",
+            "Switch this session to the WinRestyle desktop right now?\n\
+             \n\
+             This restarts the Windows desktop — open File Explorer windows will \
+             close. Choosing No keeps the standard desktop until your next sign-in.",
+        )
+    {
+        STATE.with(|s| {
+            if let Some(st) = s.borrow_mut().as_mut() {
+                st.status = "Activating — switching this session to WinRestyle…".to_string();
+            }
+        });
+        unsafe {
+            let _ = InvalidateRect(hwnd, None, false);
+            let _ = UpdateWindow(hwnd);
+        }
+        // activate_now sweeps, stops explorer, spawns the watchdog, and
+        // sleeps while the new desktop settles — all pumping or blocking,
+        // none of it under a STATE borrow.
+        status = match wr_core::manager::activate_now() {
+            Ok(o) => o.headline,
+            Err(e) => {
+                message_box(hwnd, "Could not activate", &format!("{e:#}"), true);
+                format!("Live activation failed: {e}")
+            }
+        };
+    }
+
     STATE.with(|s| {
         if let Some(st) = s.borrow_mut().as_mut() {
             st.busy = false;
             st.subtitle = shell_status_line();
-            match outcome {
-                Ok(o) => {
-                    st.base_config = config;
-                    st.status = o.headline;
-                }
-                Err(e) => st.status = format!("Apply failed: {e}"),
+            if outcome.is_ok() {
+                st.base_config = config;
             }
+            st.status = status;
         }
     });
     redraw(hwnd);
@@ -443,8 +482,8 @@ fn do_restore(hwnd: HWND) {
             hwnd,
             "Windows shell restored",
             &format!(
-                "{o:?}. If WinRestyle was live in this session, log out and back in \
-                 (or it has already been swept) to return to the standard desktop.",
+                "{o:?}. If WinRestyle was live in this session, it has been swept and \
+                 the standard desktop is back — no sign-out needed.",
             ),
             false,
         ),
@@ -479,6 +518,21 @@ fn message_box(hwnd: HWND, caption: &str, body: &str, warning: bool) {
                     MB_ICONINFORMATION
                 },
         );
+    }
+}
+
+/// A Yes/No question; `true` = Yes. Pumps a modal loop — same rule as
+/// [`message_box`]: never call with a `STATE` borrow held.
+fn confirm_box(hwnd: HWND, caption: &str, body: &str) -> bool {
+    let body = wide(body);
+    let caption = wide(caption);
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_YESNO | MB_ICONQUESTION,
+        ) == IDYES
     }
 }
 

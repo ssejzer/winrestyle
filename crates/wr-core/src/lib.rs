@@ -19,6 +19,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\winrestyle";
 pub const EMERGENCY_HOTKEY_LABEL: &str = "Win + Ctrl + F1";
 
 /// Executable names, shared so supervision and stray sweeps never drift.
+pub const WATCHDOG_EXE: &str = "wr-watchdog.exe";
 pub const SHELL_EXE: &str = "wr-shell.exe";
 pub const TASKBAR_EXE: &str = "wr-taskbar.exe";
 

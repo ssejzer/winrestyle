@@ -16,10 +16,15 @@
 //! 5. **Recovery instructions** — hand the user the emergency hotkey and the
 //!    one-command restore, every time.
 //!
-//! Teardown ([`uninstall`]) is the CLI `restore` path, shared so the GUI and
-//! CLI can never diverge: restore the registry, sweep our surfaces, and relaunch
-//! explorer only if no desktop shell is already on screen (idempotent — the same
-//! rule the watchdog's `recover()` follows).
+//! [`activate_now`] (ADR 0008) optionally follows a successful apply: it makes
+//! the swap live in *this* session — stop explorer, launch the watchdog, the
+//! same transition the next logon would perform — falling back to
+//! activate-at-next-logon if Windows relaunches explorer. Teardown
+//! ([`uninstall`]) is shared by the manager's Undo and the CLI `deactivate` so
+//! GUI and CLI can never diverge: restore the registry, sweep the whole
+//! WinRestyle family (repeatedly — mutual supervision resurrects single-pass
+//! survivors), and relaunch explorer only if no desktop shell is already on
+//! screen (idempotent — the same rule the watchdog's `recover()` follows).
 //!
 //! The pure parts (recovery text, preflight logic, step descriptions) are
 //! cross-platform and unit-tested; only the registry/process steps are gated to
@@ -28,7 +33,8 @@
 /// The WinRestyle binaries that must sit next to the installer for a swap to be
 /// safe. The registry `Shell` value points at the watchdog, which spawns the
 /// shell, which spawns the taskbar — all three must exist.
-pub const REQUIRED_BINARIES: [&str; 3] = ["wr-watchdog.exe", crate::SHELL_EXE, crate::TASKBAR_EXE];
+pub const REQUIRED_BINARIES: [&str; 3] =
+    [crate::WATCHDOG_EXE, crate::SHELL_EXE, crate::TASKBAR_EXE];
 
 /// Which of [`REQUIRED_BINARIES`] are absent, given a presence predicate.
 /// Split out from the filesystem so the check is testable on any host.
@@ -46,8 +52,8 @@ pub fn recovery_instructions() -> String {
         "If the new desktop misbehaves, you can always get Windows back:\n\
          \n\
          • Press {hotkey} at any time — it restores explorer immediately.\n\
+         • Or run `wr-installer deactivate` (the manager's Undo does the same).\n\
          • Or run `wr-installer restore` from another machine/account, then log in again.\n\
-         • The change only takes full effect after you log out and back in.\n\
          \n\
          Your original shell setting was backed up and is restored byte-for-byte.",
         hotkey = crate::EMERGENCY_HOTKEY_LABEL,
@@ -67,7 +73,16 @@ impl ApplyOutcome {
     #[cfg_attr(not(windows), allow(dead_code))]
     fn applied() -> Self {
         ApplyOutcome {
-            headline: "Restyle applied — log out and back in to start WinRestyle.".to_string(),
+            headline: "Restyle applied — activate it now, or it starts at your next sign-in."
+                .to_string(),
+            instructions: recovery_instructions(),
+        }
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn activated() -> Self {
+        ApplyOutcome {
+            headline: "WinRestyle is now your desktop.".to_string(),
             instructions: recovery_instructions(),
         }
     }
@@ -146,7 +161,7 @@ mod imp {
 
         // The registry Shell value must point at the *watchdog* (it owns the
         // emergency hotkey and supervises the shell), never wr-shell directly.
-        let watchdog = install_dir()?.join("wr-watchdog.exe");
+        let watchdog = install_dir()?.join(crate::WATCHDOG_EXE);
         crate::shell::backup_and_set_shell(&watchdog.to_string_lossy())
             .context("backing up and setting the shell")?;
 
@@ -154,19 +169,86 @@ mod imp {
         Ok(ApplyOutcome::applied())
     }
 
+    /// How long live activation waits for the swapped-in desktop to settle
+    /// (and for a winlogon-relaunched explorer to reveal itself) before
+    /// judging success.
+    const ACTIVATE_SETTLE: Duration = Duration::from_millis(2500);
+
+    /// Sweep every WinRestyle process, repeatedly, until a full pass finds
+    /// nothing. One pass is not enough: the watchdog and shell resurrect each
+    /// other (ADR 0002 — that's the feature), so a survivor can respawn its
+    /// peer between two single-pass kills. Best-effort with a round cap, like
+    /// every sweep.
+    pub fn sweep_wr_processes() {
+        const EXES: [&str; 3] = [crate::TASKBAR_EXE, crate::SHELL_EXE, crate::WATCHDOG_EXE];
+        for _ in 0..8 {
+            let killed: usize = EXES
+                .iter()
+                .map(|exe| crate::process::kill_all_named(exe))
+                .sum();
+            if killed == 0 && !EXES.iter().any(|exe| crate::process::any_named(exe)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        log::warn!("WinRestyle processes still alive after sweep rounds");
+    }
+
+    /// Live activation (ADR 0008): make an already-applied restyle the
+    /// desktop of *this* session, no re-logon — the same transition the next
+    /// logon would perform. Stop explorer's desktop, then launch the watchdog
+    /// exactly as winlogon would; the taskbar sees no foreign desktop shell
+    /// and comes up swapped (topmost + tray host).
+    ///
+    /// Best-effort by design: the registry swap has already happened, so on
+    /// any failure the session is left (or put back) in the proven
+    /// "active at next logon" state and the error says so. The emergency
+    /// hotkey is live as soon as the watchdog starts.
+    pub fn activate_now() -> Result<ApplyOutcome> {
+        preflight()?;
+        // Idempotence: converge to zero WinRestyle processes before starting
+        // exactly one family.
+        sweep_wr_processes();
+
+        // Stop explorer — the documented exception to "own names only" in
+        // `process` (ADR 0008). This closes open File Explorer windows too;
+        // the callers' confirm prompts say so.
+        let killed = crate::process::kill_all_named("explorer.exe");
+        log::info!("live activate: stopped {killed} explorer process(es)");
+
+        let watchdog = install_dir()?.join(crate::WATCHDOG_EXE);
+        Command::new(&watchdog)
+            .spawn()
+            .with_context(|| format!("launching {}", watchdog.display()))?;
+        log::info!("live activate: watchdog launched");
+
+        // Winlogon's AutoRestartShell resurrects *explorer* on some setups
+        // (it never manages custom shells — ADR 0001/T5). If explorer's
+        // desktop is back, two shells would fight over the screen: back our
+        // family out and fall back to activation at the next logon.
+        std::thread::sleep(ACTIVATE_SETTLE);
+        if crate::shell::desktop_shell_running() {
+            sweep_wr_processes();
+            bail!(
+                "Windows relaunched explorer, so live activation backed itself out. \
+                 The restyle is still applied and will activate at your next sign-in."
+            );
+        }
+        log::info!("live activate: done");
+        Ok(ApplyOutcome::activated())
+    }
+
     /// Teardown: restore the registry and bring explorer back if needed. Shared
-    /// by the CLI `restore` and the manager's uninstall button. Idempotent — a
+    /// by the manager's Undo button and the CLI `deactivate`. Idempotent — a
     /// second explorer is launched only when no desktop shell is on screen
-    /// (the same rule as the watchdog's `recover()`), and our surfaces are
-    /// swept so none linger over the restored desktop.
+    /// (the same rule as the watchdog's `recover()`), and the whole WinRestyle
+    /// family is swept (repeatedly — mutual supervision resurrects single-pass
+    /// survivors) so a live swapped session actually ends here instead of the
+    /// watchdog respawning what we killed.
     pub fn uninstall() -> Result<RestoreOutcome> {
         let outcome = crate::shell::restore_shell().context("restoring the shell registry")?;
 
-        // Sweep our surfaces so an uninstall from within a swapped session
-        // never leaves a WinRestyle window floating over explorer.
-        for exe in [crate::TASKBAR_EXE, crate::SHELL_EXE] {
-            crate::process::kill_all_named(exe);
-        }
+        sweep_wr_processes();
 
         if crate::shell::desktop_shell_running() {
             log::info!("desktop shell already running; not launching explorer");
@@ -181,7 +263,7 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{apply_restyle, preflight, trial_run, uninstall};
+pub use imp::{activate_now, apply_restyle, preflight, sweep_wr_processes, trial_run, uninstall};
 
 #[cfg(test)]
 mod tests {
@@ -192,7 +274,7 @@ mod tests {
         let text = recovery_instructions();
         assert!(text.contains(crate::EMERGENCY_HOTKEY_LABEL));
         assert!(text.contains("restore"));
-        assert!(text.contains("log out"));
+        assert!(text.contains("deactivate"));
     }
 
     #[test]
