@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn merge_of_identical_lists_is_equal() {
         let old = [w(1, "a"), w(2, "b")];
-        let (merged, added, removed) = merge(&old, &old.to_vec());
+        let (merged, added, removed) = merge(&old, &old);
         assert_eq!(merged, old.to_vec());
         assert!(added.is_empty() && removed.is_empty());
     }
