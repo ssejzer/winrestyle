@@ -61,12 +61,16 @@ pub struct Frame<'a> {
     /// Bar-local chip rectangles; `rects[i]` belongs to `tasks[i]` (the tail
     /// of `tasks` may have no rect when the bar overflows).
     pub rects: &'a [BarRect],
+    /// Square for the Start button at the bar's left edge.
+    pub start: BarRect,
     /// Raw handle of the foreground window (highlighted chip), 0 for none.
     pub active: isize,
     /// Decoded icons per window; `Some(None)` remembers "asked, has none".
     pub icons: &'a HashMap<isize, Option<Icon>>,
     /// Index of the chip under the mouse, if any.
     pub hovered: Option<usize>,
+    /// Whether the mouse is over the Start button.
+    pub start_hovered: bool,
 }
 
 fn color(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
@@ -197,9 +201,10 @@ impl Renderer {
         self.bind_target()
     }
 
-    /// Draw the bar — rounded translucent fill, window-button chips, and the
-    /// right-aligned clock — and present. `D2DERR_RECREATE_TARGET` bubbles up
-    /// so the caller can rebuild the renderer.
+    /// Draw the bar — rounded translucent fill, the Start button,
+    /// window-button chips, and the right-aligned clock — and present.
+    /// `D2DERR_RECREATE_TARGET` bubbles up so the caller can rebuild the
+    /// renderer.
     pub fn draw(&mut self, f: &Frame) -> windows::core::Result<()> {
         self.sync_icon_cache(f);
         let size = unsafe { self.dc.GetSize() };
@@ -230,6 +235,50 @@ impl Renderer {
             let text_brush = self
                 .dc
                 .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.92), None)?;
+            let chip_radius = layout::scale(6, f.dpi) as f32;
+
+            // Start button: the same chip treatment as the window buttons,
+            // with a four-pane Windows-style glyph. Clicking it is a stub
+            // launch for now (the real menu is a later phase).
+            {
+                let s = f.start;
+                let rect = D2D_RECT_F {
+                    left: s.x as f32,
+                    top: s.y as f32,
+                    right: (s.x + s.w) as f32,
+                    bottom: (s.y + s.h) as f32,
+                };
+                let chip = self.dc.CreateSolidColorBrush(
+                    &color(1.0, 1.0, 1.0, chip_alpha(false, f.start_hovered)),
+                    None,
+                )?;
+                self.dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect,
+                        radiusX: chip_radius,
+                        radiusY: chip_radius,
+                    },
+                    &chip,
+                );
+                let glyph = layout::scale(14, f.dpi) as f32;
+                let gap = layout::scale(2, f.dpi).max(1) as f32;
+                let pane = ((glyph - gap) / 2.0).max(1.0);
+                let gx = rect.left + (s.w as f32 - glyph) / 2.0;
+                let gy = rect.top + (s.h as f32 - glyph) / 2.0;
+                for (ix, iy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let left = gx + ix as f32 * (pane + gap);
+                    let top = gy + iy as f32 * (pane + gap);
+                    self.dc.FillRectangle(
+                        &D2D_RECT_F {
+                            left,
+                            top,
+                            right: left + pane,
+                            bottom: top + pane,
+                        },
+                        &text_brush,
+                    );
+                }
+            }
 
             // Window buttons: translucent white chips over the bar color —
             // brighter when hovered, brighter still for the foreground
@@ -240,7 +289,6 @@ impl Renderer {
                     .dc
                     .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.08), None)?;
                 let label = self.text_format(12.0, f.dpi, DWRITE_TEXT_ALIGNMENT_LEADING)?;
-                let chip_radius = layout::scale(6, f.dpi) as f32;
                 let pad = layout::scale(10, f.dpi) as f32;
                 let icon_size = layout::scale(16, f.dpi) as f32;
                 let icon_gap = layout::scale(6, f.dpi) as f32;

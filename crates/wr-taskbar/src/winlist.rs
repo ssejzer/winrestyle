@@ -15,6 +15,10 @@ use windows::Win32::Graphics::Gdi::{
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    VK_LWIN,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassLongPtrW, GetClassNameW, GetForegroundWindow, GetIconInfo, GetWindow,
     GetWindowLongPtrW, GetWindowTextW, IsIconic, IsWindowVisible, PostMessageW,
@@ -313,5 +317,28 @@ pub fn activate(hwnd_raw: isize) {
 unsafe fn focus(hwnd: HWND) {
     if !SetForegroundWindow(hwnd).as_bool() {
         SwitchToThisWindow(hwnd, true);
+    }
+}
+
+/// Stub Start action: tap the Win key. Unswapped this opens the system Start
+/// menu (explorer is running); in a swapped session no Start experience
+/// exists, so the tap lands on nothing — the real menu is `wr-startmenu`, a
+/// later phase.
+pub fn open_start_menu() {
+    let key = |flags: KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_LWIN,
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
+    };
+    let inputs = [key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)];
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        // Blocked by UIPI or an open secure desktop; nothing to recover.
+        log::warn!("start: SendInput injected {sent}/{} events", inputs.len());
     }
 }

@@ -51,6 +51,8 @@ struct State {
     tasks: Vec<TaskWindow>,
     /// Chip rectangle for `tasks[i]` (the tail may be dropped on overflow).
     rects: Vec<layout::BarRect>,
+    /// Square for the Start button at the bar's left edge.
+    start: layout::BarRect,
     /// Foreground window handle (0 = none), for the highlighted chip.
     active: isize,
     /// Decoded icons per window; `Some(None)` remembers "asked, has none"
@@ -58,6 +60,8 @@ struct State {
     icons: HashMap<isize, Option<tasks::Icon>>,
     /// Index of the chip under the mouse.
     hovered: Option<usize>,
+    /// Whether the mouse is over the Start button.
+    start_hovered: bool,
     /// Whether a `WM_MOUSELEAVE` request is currently armed.
     mouse_tracking: bool,
     /// Id of the registered `CONFIG_CHANGED_MESSAGE` the shell posts to us.
@@ -153,9 +157,11 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
             clock: String::new(),
             tasks: Vec::new(),
             rects: Vec::new(),
+            start: layout::start_rect(rect.h, dpi),
             active: 0,
             icons: HashMap::new(),
             hovered: None,
+            start_hovered: false,
             mouse_tracking: false,
             config_changed_msg,
             log_next_paint: true,
@@ -210,14 +216,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xffff) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-            let target = STATE.with(|s| {
-                s.borrow().as_ref().and_then(|st| {
-                    layout::hit_test(&st.rects, x, y)
+            let (on_start, target) = STATE.with(|s| {
+                s.borrow().as_ref().map_or((false, None), |st| {
+                    if st.start.contains(x, y) {
+                        return (true, None);
+                    }
+                    let target = layout::hit_test(&st.rects, x, y)
                         .and_then(|i| st.tasks.get(i))
-                        .map(|t| t.hwnd)
+                        .map(|t| t.hwnd);
+                    (false, target)
                 })
             });
-            if let Some(target) = target {
+            if on_start {
+                log::info!("start button clicked (stub: tapping the Win key)");
+                winlist::open_start_menu();
+            } else if let Some(target) = target {
                 winlist::activate(target);
             }
             LRESULT(0)
@@ -230,9 +243,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let Some(st) = s.as_mut() else {
                     return (false, false);
                 };
-                let hovered = layout::hit_test(&st.rects, x, y);
-                let changed = hovered != st.hovered;
+                let start_hovered = st.start.contains(x, y);
+                let hovered = if start_hovered {
+                    None
+                } else {
+                    layout::hit_test(&st.rects, x, y)
+                };
+                let changed = hovered != st.hovered || start_hovered != st.start_hovered;
                 st.hovered = hovered;
+                st.start_hovered = start_hovered;
                 let arm = !st.mouse_tracking;
                 st.mouse_tracking = true;
                 (changed, arm)
@@ -264,7 +283,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let mut s = s.borrow_mut();
                 let Some(st) = s.as_mut() else { return false };
                 st.mouse_tracking = false;
-                st.hovered.take().is_some()
+                let had_chip = st.hovered.take().is_some();
+                std::mem::take(&mut st.start_hovered) || had_chip
             });
             if had_hover {
                 redraw(hwnd);
@@ -364,6 +384,7 @@ fn apply_layout(hwnd: HWND) {
                 log::error!("swapchain resize failed: {e}");
             }
             st.rects = layout::button_rects(rect.w, rect.h, st.tasks.len(), st.dpi);
+            st.start = layout::start_rect(rect.h, st.dpi);
         }
     });
     redraw(hwnd);
@@ -453,9 +474,11 @@ fn redraw(hwnd: HWND) {
             dpi: st.dpi,
             tasks: &st.tasks,
             rects: &st.rects,
+            start: st.start,
             active: st.active,
             icons: &st.icons,
             hovered: st.hovered,
+            start_hovered: st.start_hovered,
         };
         match st.renderer.draw(&frame) {
             Ok(()) => {
@@ -483,9 +506,11 @@ fn redraw(hwnd: HWND) {
                             dpi: st.dpi,
                             tasks: &st.tasks,
                             rects: &st.rects,
+                            start: st.start,
                             active: st.active,
                             icons: &st.icons,
                             hovered: st.hovered,
+                            start_hovered: st.start_hovered,
                         };
                         if let Err(e) = st.renderer.draw(&frame) {
                             log::error!("draw after renderer rebuild failed: {e}");

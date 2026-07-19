@@ -78,9 +78,13 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       alpha handled), premultiplied, uploaded once and cached per window.
       Hover via mouse-move hit-testing + `TrackMouseEvent` leave tracking.
       (2026-07-19; visual check at the next manual T3.)
+- [x] Start button (stub launch): leftmost square chip, four-pane glyph,
+      hover state; clicking taps the Win key — opens the system Start menu
+      unswapped, lands on nothing in a swapped session (the real menu is
+      `wr-startmenu`, Phase 4). (2026-07-19; visual + click check at the
+      next manual T3.)
 - [ ] Overflow/grouping UI.
-- [ ] Widgets beyond the clock (shipped with the first slice); Start button
-      (stub launch).
+- [ ] Widgets beyond the clock (shipped with the first slice).
 - [ ] Pinned apps.
 - [ ] **System tray hosting** (`Shell_TrayWnd` / `Shell_NotifyIcon` protocol).
       Prereq recorded in ADR 0005: `desktop_shell_running()` must first learn

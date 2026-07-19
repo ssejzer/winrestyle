@@ -220,9 +220,12 @@ real taskbar during testing; in a swapped session it is topmost.
    it` and no `wr-taskbar.exe` appears.
 5. What the harness can't cover (verify at the manual T3 release pass): the
    bar is actually *visible* (bottom of the primary monitor, rounded,
-   translucent, clock on the right), and after `Win + Ctrl + F1` the restored
-   explorer desktop has **no WinRestyle bar left on screen** (recovery paths
-   sweep `wr-taskbar.exe`).
+   translucent, clock on the right); the Start button (square chip with a
+   four-pane glyph) sits leftmost and lightens on hover — clicking it
+   unswapped opens the system Start menu, swapped it does nothing visible
+   but logs `start button clicked` (stub; real menu is a later phase); and
+   after `Win + Ctrl + F1` the restored explorer desktop has **no WinRestyle
+   bar left on screen** (recovery paths sweep `wr-taskbar.exe`).
 
 ## T14 — Taskbar buttons track running windows  (Phase 2)
 

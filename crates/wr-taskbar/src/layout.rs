@@ -10,6 +10,13 @@ pub struct BarRect {
     pub h: i32,
 }
 
+impl BarRect {
+    /// Whether the point (same coordinate space as the rect) lies inside.
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+}
+
 /// Scale a 96-DPI config length to physical pixels, rounding to nearest.
 pub fn scale(px: u32, dpi: u32) -> i32 {
     ((px as u64 * dpi as u64 + 48) / 96) as i32
@@ -39,8 +46,22 @@ const BUTTON_GAP: u32 = 6;
 const BUTTON_VPAD: u32 = 6;
 const EDGE_PAD: u32 = 10;
 
+/// Bar-local square for the Start button: the leftmost element, inset by the
+/// same edge/vertical padding as the window chips. Window buttons lay out
+/// after it.
+pub fn start_rect(bar_h: i32, dpi: u32) -> BarRect {
+    let vpad = scale(BUTTON_VPAD, dpi);
+    let side = (bar_h - 2 * vpad).max(1);
+    BarRect {
+        x: scale(EDGE_PAD, dpi),
+        y: vpad,
+        w: side,
+        h: side,
+    }
+}
+
 /// Bar-local rectangles for `count` window buttons: left-aligned after the
-/// edge padding, stopping before the clock reserve. Buttons shrink from
+/// Start button, stopping before the clock reserve. Buttons shrink from
 /// `BUTTON_MAX_W` down to `BUTTON_MIN_W` as the bar fills; windows that
 /// still don't fit get no button (dropped from the end — grouping/overflow
 /// UI is a later slice).
@@ -48,9 +69,10 @@ pub fn button_rects(bar_w: i32, bar_h: i32, count: usize, dpi: u32) -> Vec<BarRe
     if count == 0 {
         return Vec::new();
     }
-    let pad = scale(EDGE_PAD, dpi);
     let gap = scale(BUTTON_GAP, dpi);
     let vpad = scale(BUTTON_VPAD, dpi);
+    let start = start_rect(bar_h, dpi);
+    let pad = start.x + start.w + gap;
     let avail = bar_w - pad - scale(CLOCK_RESERVE, dpi);
     let max_w = scale(BUTTON_MAX_W, dpi).max(1);
     let min_w = scale(BUTTON_MIN_W, dpi).max(1);
@@ -76,9 +98,7 @@ pub fn button_rects(bar_w: i32, bar_h: i32, count: usize, dpi: u32) -> Vec<BarRe
 
 /// Index of the rect containing the point, if any.
 pub fn hit_test(rects: &[BarRect], x: i32, y: i32) -> Option<usize> {
-    rects
-        .iter()
-        .position(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+    rects.iter().position(|r| r.contains(x, y))
 }
 
 #[cfg(test)]
@@ -121,12 +141,26 @@ mod tests {
     }
 
     #[test]
+    fn start_button_is_a_padded_square() {
+        let s = start_rect(48, 96);
+        assert_eq!((s.x, s.y, s.w, s.h), (10, 6, 36, 36));
+        // Scales with DPI, stays square.
+        let s = start_rect(72, 144);
+        assert_eq!((s.x, s.y, s.w, s.h), (15, 9, 54, 54));
+        // A degenerate bar height never yields an empty rect.
+        let s = start_rect(1, 96);
+        assert!(s.w >= 1 && s.h >= 1);
+    }
+
+    #[test]
     fn few_buttons_take_max_width() {
         let rects = button_rects(1920, 48, 3, 96);
         assert_eq!(rects.len(), 3);
         assert!(rects.iter().all(|r| r.w == 180));
-        assert_eq!(rects[0].x, 10);
-        assert_eq!(rects[1].x, 10 + 180 + 6);
+        // Buttons begin after the Start button (10 + 36 + 6 gap).
+        let start = start_rect(48, 96);
+        assert_eq!(rects[0].x, start.x + start.w + 6);
+        assert_eq!(rects[1].x, rects[0].x + 180 + 6);
         // Vertical padding leaves a slimmer chip inside the bar.
         assert!(rects.iter().all(|r| r.y == 6 && r.h == 48 - 12));
     }
@@ -170,6 +204,18 @@ mod tests {
         // The bar background outside any chip is a miss.
         assert_eq!(hit_test(&rects, 1919, 20), None);
         assert_eq!(hit_test(&[], 10, 10), None);
+    }
+
+    #[test]
+    fn start_button_and_window_buttons_never_overlap() {
+        let start = start_rect(48, 96);
+        assert!(start.contains(start.x, start.y));
+        assert!(start.contains(start.x + start.w - 1, start.y + start.h - 1));
+        assert!(!start.contains(start.x + start.w, start.y));
+        // The first window chip starts past the Start button, so a point
+        // inside the Start square never also hits a chip.
+        let rects = button_rects(1920, 48, 3, 96);
+        assert_eq!(hit_test(&rects, start.x + start.w - 1, 20), None);
     }
 
     #[test]
