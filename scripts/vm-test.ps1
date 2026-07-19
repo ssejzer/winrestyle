@@ -465,7 +465,10 @@ public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName)
 [DllImport("user32.dll")]
 public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 '@
-    $barWnd = [WRTest.U32]::FindWindowW('WinRestyleTaskbar', $null)
+    # PowerShell marshals $null as String.Empty for string parameters, which
+    # would make FindWindowW match on an empty *title* too; [NullString]
+    # passes a real NULL so only the class is matched.
+    $barWnd = [WRTest.U32]::FindWindowW('WinRestyleTaskbar', [NullString]::Value)
     $clicked = $false
     $geom = [regex]::Match((Get-Log $wd.Log), 'pinned\[0\] chip at (\d+),(\d+) (\d+)x(\d+)')
     if ($barWnd -ne [IntPtr]::Zero -and $geom.Success) {
