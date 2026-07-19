@@ -382,13 +382,26 @@ itself splits like the manager's:
 
 ## T18 — Live activate / deactivate  (ADR 0008)
 
+> First run (2026-07-19) half-passed: **activation worked live** — swapped
+> desktop up, `WinRestyle is now your desktop`, and `Win+Ctrl+F1` restored
+> explorer mid-session — but the harness hung on its own `Start-Process
+> -Wait`, which waits for **descendants** too, and both verbs deliberately
+> leave descendants running (activate → the watchdog family; deactivate →
+> explorer; even the hotkey-relaunched explorer counts, so the wait outlived
+> the restore). Fixed: the harness waits on the installer process alone.
+> Full pass pending the next run.
+
 The only automated test that swaps the running session's desktop for real —
 which is why it runs **last**. It proves the no-logon path both ways:
 
 1. `wr-installer apply` then `wr-installer activate`. ✅ Pass if explorer is
    gone, exactly one watchdog + shell + taskbar are running, and the log shows
    the swapped-mode signature `taskbar up: … topmost, tray host active` (never
-   seen in the unswapped tests).
+   seen in the unswapped tests). Activation stops the outgoing desktop *and
+   its descendant app tree* (ADR 0008 amendment — activation replaces a
+   logout, which ends the session), but spares the branch that launched it —
+   which is exactly why the harness PowerShell driving `activate` keeps
+   running to record the result and drive step 2.
 2. `wr-installer deactivate`. ✅ Pass if explorer is back, all three WinRestyle
    processes are swept (repeated sweep — mutual supervision resurrects
    single-pass survivors), and the registry backup key is gone.

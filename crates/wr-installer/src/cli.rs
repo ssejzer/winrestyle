@@ -52,7 +52,9 @@ pub fn activate() -> Result<()> {
         println!("note: the shell registry is not swapped (`apply` not run); activating anyway");
         println!("      starts WinRestyle for this session only.");
     }
-    println!("WARNING: this stops explorer and starts the WinRestyle desktop NOW.");
+    println!("WARNING: this stops the desktop and starts WinRestyle NOW.");
+    println!("         Like a sign-out it closes the apps you launched from the");
+    println!("         desktop (save first); this terminal keeps running.");
     let outcome = wr_core::manager::activate_now()?;
     println!("{}", outcome.headline);
     println!("{}", outcome.instructions);

@@ -17,9 +17,11 @@
 //!    one-command restore, every time.
 //!
 //! [`activate_now`] (ADR 0008) optionally follows a successful apply: it makes
-//! the swap live in *this* session — stop explorer, launch the watchdog, the
-//! same transition the next logon would perform — falling back to
-//! activate-at-next-logon if Windows relaunches explorer. Teardown
+//! the swap live in *this* session — stop the outgoing desktop and the app
+//! tree it spawned (a logout ends them all; `process::kill_tree_named` spares
+//! the branch that launched us), launch the watchdog, the same transition the
+//! next logon would perform — falling back to activate-at-next-logon if
+//! Windows relaunches explorer. Teardown
 //! ([`uninstall`]) is shared by the manager's Undo and the CLI `deactivate` so
 //! GUI and CLI can never diverge: restore the registry, sweep the whole
 //! WinRestyle family (repeatedly — mutual supervision resurrects single-pass
@@ -210,11 +212,15 @@ mod imp {
         // exactly one family.
         sweep_wr_processes();
 
-        // Stop explorer — the documented exception to "own names only" in
-        // `process` (ADR 0008). This closes open File Explorer windows too;
-        // the callers' confirm prompts say so.
-        let killed = crate::process::kill_all_named("explorer.exe");
-        log::info!("live activate: stopped {killed} explorer process(es)");
+        // Stop the outgoing desktop AND the session tree it spawned — the
+        // apps the user launched from the old shell — because activation
+        // stands in for a logout, which ends them all. `kill_tree_named`
+        // spares this process and the branch that launched it (the terminal
+        // or manager window), and it is the one documented non-WinRestyle use
+        // of `process`'s kills (ADR 0008). Forceful, no save prompt — the
+        // callers confirm first.
+        let killed = crate::process::kill_tree_named("explorer.exe");
+        log::info!("live activate: stopped the outgoing desktop + {killed} session process(es)");
 
         let watchdog = install_dir()?.join(crate::WATCHDOG_EXE);
         Command::new(&watchdog)

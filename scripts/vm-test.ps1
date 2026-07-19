@@ -607,8 +607,15 @@ try {
     & $Installer apply | Out-Null
     # The spawned watchdog (and its children) inherit stderr, so the whole
     # family's logs land in the activate log file.
+    # NEVER Start-Process -Wait here: -Wait waits for DESCENDANTS too, and
+    # activate deliberately leaves the watchdog family running (deactivate
+    # likewise leaves explorer) - it hung the suite's first run (2026-07-19).
+    # Wait on the installer process alone.
     $proc = Start-Process -FilePath $Installer -ArgumentList 'activate' -NoNewWindow `
-        -PassThru -Wait -RedirectStandardError $t18log
+        -PassThru -RedirectStandardError $t18log
+    $exited = Wait-Until { $proc.HasExited } 30
+    if (-not $exited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    $activateOk = $exited -and ($proc.ExitCode -eq 0)
     $familyUp = Wait-Until {
         ((Get-Pids 'wr-watchdog').Count -eq 1) -and
         ((Get-Pids 'wr-shell').Count -eq 1) -and
@@ -619,13 +626,17 @@ try {
     $swapped = Wait-Until { (Get-Log $t18log) -match 'taskbar up: .*topmost, tray host active' } 20
     $explorerGone = $null -eq (Get-Process explorer -ErrorAction SilentlyContinue)
     Record 'T18 activate swaps the live session (explorer out, wr desktop up)' `
-        (($proc.ExitCode -eq 0) -and $familyUp -and $swapped -and $explorerGone) `
-        "exit=$($proc.ExitCode) family=$familyUp swapped=$swapped explorerGone=$explorerGone" `
+        ($activateOk -and $familyUp -and $swapped -and $explorerGone) `
+        "activateOk=$activateOk family=$familyUp swapped=$swapped explorerGone=$explorerGone" `
         -LogFile $t18log
 
     $t18dlog = Join-Path $LogDir 't18-deactivate.log'
+    # Same rule as activate: no -Wait (deactivate leaves explorer running).
     $proc = Start-Process -FilePath $Installer -ArgumentList 'deactivate' -NoNewWindow `
-        -PassThru -Wait -RedirectStandardError $t18dlog
+        -PassThru -RedirectStandardError $t18dlog
+    $exited = Wait-Until { $proc.HasExited } 30
+    if (-not $exited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    $deactivateOk = $exited -and ($proc.ExitCode -eq 0)
     $explorerBack = Wait-Until { $null -ne (Get-Process explorer -ErrorAction SilentlyContinue) } 25
     $wrGone = Wait-Until {
         ((Get-Pids 'wr-watchdog').Count -eq 0) -and
@@ -634,8 +645,8 @@ try {
     } 15
     $backupGone = -not (Test-Path $BackupKey)
     Record 'T18 deactivate restores explorer + registry, sweeps the family' `
-        (($proc.ExitCode -eq 0) -and $explorerBack -and $wrGone -and $backupGone) `
-        "exit=$($proc.ExitCode) explorerBack=$explorerBack wrGone=$wrGone backupGone=$backupGone" `
+        ($deactivateOk -and $explorerBack -and $wrGone -and $backupGone) `
+        "deactivateOk=$deactivateOk explorerBack=$explorerBack wrGone=$wrGone backupGone=$backupGone" `
         -LogFile $t18dlog
     Reset-TestEnv
     }

@@ -426,8 +426,10 @@ fn do_apply(hwnd: HWND) {
             "Activate now?",
             "Switch this session to the WinRestyle desktop right now?\n\
              \n\
-             This restarts the Windows desktop — open File Explorer windows will \
-             close. Choosing No keeps the standard desktop until your next sign-in.",
+             Like signing out and back in, this closes the apps you have open \
+             (save your work first) — but without the wait, and this manager \
+             stays open. Choosing No keeps the standard desktop until your \
+             next sign-in.",
         )
     {
         STATE.with(|s| {

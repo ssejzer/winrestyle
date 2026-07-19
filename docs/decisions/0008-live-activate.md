@@ -20,13 +20,12 @@ lifecycle, built from primitives every prior phase validated.
 
 1. **`manager::activate_now()` performs the exact transition the next logon
    would**, in this order: preflight → converge to zero WinRestyle processes →
-   stop `explorer.exe` → launch `wr-watchdog.exe` (which spawns the shell,
-   which spawns the taskbar; the taskbar sees no foreign desktop shell and
-   comes up swapped — topmost, tray host on). The emergency hotkey is armed as
-   soon as the watchdog starts. Killing explorer is the one deliberate
-   exception to `process`'s "own executable names only" rule, documented
-   there; it closes open File Explorer windows, which the confirm prompts say
-   out loud.
+   stop the outgoing desktop **and the session tree it spawned** → launch
+   `wr-watchdog.exe` (which spawns the shell, which spawns the taskbar; the
+   taskbar sees no foreign desktop shell and comes up swapped — topmost, tray
+   host on). The emergency hotkey is armed as soon as the watchdog starts.
+   Stopping the desktop tree is the one deliberate exception to `process`'s
+   "own executable names only" rule, documented there (see the amendment).
 
 2. **Best-effort with a safe fallback.** The registry swap has already
    happened before activation is attempted, so the worst case is always the
@@ -72,6 +71,13 @@ lifecycle, built from primitives every prior phase validated.
   (`taskbar up: … topmost, tray host active`); `deactivate` must bring
   explorer back, sweep the family to zero, and remove the backup key. The
   harness's `finally` relaunches explorer if the test dies mid-swap.
+- **First VM run (2026-07-19): activation itself passed live** — the session
+  swapped onto the WinRestyle desktop mid-suite and `Win+Ctrl+F1` restored
+  explorer without a logout — but T18 recorded nothing because the harness
+  hung on `Start-Process -Wait`, which waits for *descendants* (the watchdog
+  family activate leaves running; the relaunched explorer after the hotkey
+  kept it waiting even post-restore). Harness fixed to wait on the installer
+  process alone; full T18 pass pending.
 - **Manual, next T3:** the manager's Yes/No flow end to end, and the
   backout path on any machine where explorer auto-relaunches.
 
@@ -85,3 +91,36 @@ next logon is correct regardless. `recovery_instructions()` now names
 `wr-installer deactivate`; the headline no longer claims a logout is required.
 Nothing in the watchdog, shell, taskbar, or IPC layer changed — the whole
 feature lives in `wr-core::{manager,process}` and the installer.
+
+## Amendment (2026-07-19) — activation ends the old session's app tree
+
+**Context.** The first cut of `activate_now` stopped only `explorer.exe`,
+leaving the apps the user had launched from the old shell still running under
+the new one. That looked safer, but it is inconsistent with what activation
+*replaces*: the prior way to start WinRestyle mid-day was to log out and back
+in, and **a logout terminates the whole session** — every app the user had
+open. Leaving them running was the surprise, not stopping them.
+
+**Decision.** Activation now stops the outgoing desktop **and the descendant
+process tree it spawned**, via `process::kill_tree_named("explorer.exe")` —
+the transitive children of every `explorer.exe`, which is where classic apps
+launched from the shell sit (Windows parents them to explorer and, by design,
+does *not* cascade-kill them when explorer dies, so they must be ended
+explicitly). Two guards keep it safe:
+
+- **The invoking branch is spared.** The kill excludes this process and its
+  entire ancestor chain, so the terminal running `wr-installer activate` (or
+  the manager window that a click drove) — and, in a console run, the parent
+  process waiting on us — survive even though they are themselves children of
+  the dying desktop. Without this, the CLI would kill its own terminal and the
+  automated **T18** would kill the harness PowerShell driving it.
+- **It is forceful, not graceful.** `TerminateProcess` gives no
+  `WM_QUERYENDSESSION` save prompt the way a real logout does, so the manager's
+  Yes/No dialog and the CLI warning both say "save your work first."
+
+The pid-tree math (`descendant_pids`, `ancestor_pids`) is pure and
+unit-tested on the dev host; only the process snapshot and the kill are
+Windows. Shell-UI hosts parented elsewhere (e.g. `StartMenuExperienceHost`,
+`RuntimeBroker` under `svchost`/`sihost`) are *not* explorer descendants and
+are left alone — they idle out or relaunch on demand, and several back the
+user's UWP apps, so sweeping them would over-reach.
