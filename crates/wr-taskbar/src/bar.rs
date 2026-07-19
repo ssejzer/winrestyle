@@ -36,27 +36,33 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, GetDpiForSystem, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetSystemMetrics, IsWindow, LoadCursorW, PostQuitMessage, RegisterClassW,
-    RegisterWindowMessageW, SendNotifyMessageW, SetTimer, SetWindowPos, HWND_BROADCAST,
-    HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
-    WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    GetSystemMetrics, GetWindowRect, IsWindow, LoadCursorW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SendNotifyMessageW, SetForegroundWindow, SetTimer, SetWindowPos,
+    ShowWindow, TranslateMessage, HWND_BROADCAST, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WA_INACTIVE,
+    WM_ACTIVATE, WM_CHAR, WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+    WS_VISIBLE,
 };
 
 use wr_core::config::{Backdrop, Config, ConfigStore};
 
-use crate::layout::{self, Hit};
-use crate::render::{Frame, Renderer, TrayItem};
+use crate::apps;
+use crate::layout::{self, BarRect, Hit};
+use crate::render::{Frame, MenuFrame, MenuRow, Renderer, TrayItem};
+use crate::startmenu;
 use crate::tasks::{self, TaskWindow};
 use crate::tray;
 use crate::winlist;
@@ -66,6 +72,15 @@ const CLOCK_TIMER: usize = 1;
 /// `windows-rs` files this under `UI_Controls`; not worth a whole feature
 /// for one well-known message id.
 const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// Window class of the start-menu popup (ADR 0007). The `WinRestyle` prefix
+/// keeps it out of `winlist`'s button rules; it is not `Shell_TrayWnd`, so
+/// recovery logic never sees it.
+const MENU_WINDOW_CLASS: &str = "WinRestyleStartMenu";
+
+/// A Start click arriving this soon after the menu was dismissed is the
+/// click that dismissed it — treat it as "toggle closed", not "reopen".
+const MENU_REOPEN_DEBOUNCE_MS: u64 = 300;
 
 /// One bar window on one monitor.
 struct Bar {
@@ -84,6 +99,34 @@ struct Bar {
     /// none, so the default config never touches DWM at all, and windows
     /// recreated by a display-change rebuild get theirs re-applied.
     applied_backdrop: Backdrop,
+}
+
+/// The start-menu popup (ADR 0007): one lazily created window, reused across
+/// opens, torn down on bar rebuilds. Unlike the bars it takes activation —
+/// keyboard drives it, and losing activation dismisses it.
+struct StartMenu {
+    /// Raw window handle.
+    hwnd: isize,
+    renderer: Renderer,
+    /// The bar's DPI at the last open.
+    dpi: u32,
+    /// Window size in physical pixels (the layout's coordinate space).
+    size: (i32, i32),
+    /// Geometry for the current filtered list + scroll.
+    layout: startmenu::MenuLayout,
+    /// Filter text, selection, scroll.
+    state: startmenu::MenuState,
+    /// The scanned app list (re-scanned on every open).
+    apps: Vec<apps::AppEntry>,
+    /// Indices into `apps` matching the filter.
+    filtered: Vec<usize>,
+    /// Filtered-list index under the mouse.
+    hovered: Option<usize>,
+    /// Whether a `WM_MOUSELEAVE` request is currently armed.
+    mouse_tracking: bool,
+    visible: bool,
+    /// Tick (ms) of the last dismissal, for the reopen debounce.
+    dismissed_at: u64,
 }
 
 struct State {
@@ -109,6 +152,8 @@ struct State {
     tray_pixels: HashMap<(isize, u32), Option<tasks::Icon>>,
     /// The `Shell_TrayWnd` host window; 0 when not hosting (unswapped).
     tray_hwnd: isize,
+    /// The start-menu popup; `None` until first opened.
+    menu: Option<StartMenu>,
     bars: Vec<Bar>,
     /// Id of the registered `CONFIG_CHANGED_MESSAGE` the shell posts to us.
     config_changed_msg: u32,
@@ -154,6 +199,17 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
         ..Default::default()
     };
     if unsafe { RegisterClassW(&class) } == 0 {
+        return Err(windows::core::Error::from_win32().into());
+    }
+    let menu_class_name = wide(MENU_WINDOW_CLASS);
+    let menu_class = WNDCLASSW {
+        lpfnWndProc: Some(menu_wndproc),
+        hInstance: instance.into(),
+        lpszClassName: PCWSTR(menu_class_name.as_ptr()),
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
+        ..Default::default()
+    };
+    if unsafe { RegisterClassW(&menu_class) } == 0 {
         return Err(windows::core::Error::from_win32().into());
     }
 
@@ -204,6 +260,7 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
             tray: Vec::new(),
             tray_pixels: HashMap::new(),
             tray_hwnd,
+            menu: None,
             bars,
             config_changed_msg,
             log_next_paint: true,
@@ -216,10 +273,14 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
     redraw_bars(None);
     unsafe { SetTimer(primary, CLOCK_TIMER, 1000, None) };
 
-    // The VM harness drives a pinned-chip click by posting WM_LBUTTONDOWN;
-    // publish the geometry so the test never re-derives layout constants.
+    // The VM harness drives chip clicks by posting WM_LBUTTONDOWN; publish
+    // the geometry so the tests never re-derive layout constants.
     STATE.with(|s| {
         if let Some(st) = s.borrow().as_ref() {
+            if let Some(bar) = st.bars.first() {
+                let r = bar.layout.start;
+                log::info!("start chip at {},{} {}x{} (bar-local)", r.x, r.y, r.w, r.h);
+            }
             if let Some(r) = st.bars.first().and_then(|b| b.layout.pinned.first()) {
                 log::info!(
                     "pinned[0] chip at {},{} {}x{} (bar-local)",
@@ -245,6 +306,8 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
         unsafe {
+            // Translate: the start menu's type-to-filter needs WM_CHAR.
+            let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
@@ -571,10 +634,7 @@ fn on_click(hwnd: HWND, x: i32, y: i32) {
         }
     });
     match action {
-        Action::Start => {
-            log::info!("start button clicked (stub: tapping the Win key)");
-            winlist::open_start_menu();
-        }
+        Action::Start => toggle_menu(hwnd),
         Action::Launch(path) => winlist::launch_pinned(&path),
         Action::Activate(target) => winlist::activate(target),
         Action::Overflow(items, mut anchor) => {
@@ -741,6 +801,8 @@ fn on_config_changed() {
     }
     apply_backdrop_all();
     apply_layout(None);
+    // An open menu re-themes too (no-op while hidden).
+    redraw_menu();
 }
 
 /// Push the configured DWM backdrop (or its absence) onto every bar window
@@ -1006,6 +1068,17 @@ fn rebuild_bars(reason: &str) {
 
 fn rebuild_bars_once(reason: &str) {
     log::info!("rebuilding bars ({reason})");
+    // The menu (if any) anchors to a bar and DPI that are about to change;
+    // drop it — the next Start click recreates it against the new topology.
+    let menu = STATE.with(|s| {
+        s.borrow_mut()
+            .as_mut()
+            .and_then(|st| st.menu.take())
+            .map(|m| m.hwnd)
+    });
+    if let Some(hwnd) = menu {
+        let _ = unsafe { DestroyWindow(HWND(hwnd as _)) };
+    }
     // Take the bars out (dropping their renderers), then destroy the windows
     // with no borrow held — DestroyWindow dispatches WM_DESTROY, which is
     // benign for windows no longer in the bar set (see the WM_DESTROY arm).
@@ -1164,6 +1237,440 @@ fn clock_strings(show_date: bool) -> (String, String) {
         String::new()
     };
     (clock, date)
+}
+
+// ---------------------------------------------------------------------------
+// Start menu (ADR 0007)
+// ---------------------------------------------------------------------------
+
+fn tick_ms() -> u64 {
+    unsafe { GetTickCount64() }
+}
+
+/// A Start-chip click: close an open menu, open a closed one — unless this
+/// is the click whose activation change just dismissed it.
+fn toggle_menu(bar_hwnd: HWND) {
+    enum Todo {
+        Hide,
+        Open,
+        Nothing,
+    }
+    let todo = STATE.with(|s| {
+        let s = s.borrow();
+        let Some(st) = s.as_ref() else {
+            return Todo::Nothing;
+        };
+        match &st.menu {
+            Some(m) if m.visible => Todo::Hide,
+            Some(m) if tick_ms().saturating_sub(m.dismissed_at) < MENU_REOPEN_DEBOUNCE_MS => {
+                Todo::Nothing
+            }
+            _ => Todo::Open,
+        }
+    });
+    match todo {
+        Todo::Hide => hide_menu(),
+        Todo::Open => open_menu(bar_hwnd),
+        Todo::Nothing => {}
+    }
+}
+
+fn create_menu_window(rect: &BarRect) -> Option<HWND> {
+    let instance = unsafe { GetModuleHandleW(None) }.ok()?;
+    let class_name = wide(MENU_WINDOW_CLASS);
+    unsafe {
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+            PCWSTR(class_name.as_ptr()),
+            windows::core::w!("WinRestyle Start Menu"),
+            WS_POPUP, // hidden until shown; activatable — it takes the keyboard
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            None,
+            None,
+            instance,
+            None,
+        )
+    }
+    .map_err(|e| log::error!("start menu window creation failed: {e}"))
+    .ok()
+}
+
+/// Open the menu anchored to `bar_hwnd`'s bar: fresh app scan, lazily created
+/// window, then show + activate. Every pumping call (window creation,
+/// `SetWindowPos`, `SetForegroundWindow`) runs with no `STATE` borrow held.
+fn open_menu(bar_hwnd: HWND) {
+    let Some((mon, dpi, topmost)) = STATE.with(|s| {
+        let s = s.borrow();
+        let st = s.as_ref()?;
+        let bar = bar_ref(&st.bars, bar_hwnd)?;
+        Some((bar.mon, bar.dpi, st.topmost))
+    }) else {
+        return;
+    };
+
+    // File I/O and window geometry, unborrowed.
+    let apps = apps::scan(&apps::roots());
+    let count = apps.len();
+    let mut wr = RECT::default();
+    if unsafe { GetWindowRect(bar_hwnd, &mut wr) }.is_err() {
+        return;
+    }
+    let bar_rect = BarRect {
+        x: wr.left,
+        y: wr.top,
+        w: wr.right - wr.left,
+        h: wr.bottom - wr.top,
+    };
+    let rect = startmenu::menu_rect(mon, bar_rect, dpi);
+
+    let exists = STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.menu.is_some()));
+    if !exists {
+        let Some(hwnd) = create_menu_window(&rect) else {
+            return;
+        };
+        let renderer = match Renderer::new(hwnd, rect.w, rect.h) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("start menu renderer failed: {e:#}");
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return;
+            }
+        };
+        STATE.with(|s| {
+            if let Some(st) = s.borrow_mut().as_mut() {
+                st.menu = Some(StartMenu {
+                    hwnd: hwnd.0 as isize,
+                    renderer,
+                    dpi,
+                    size: (rect.w, rect.h),
+                    layout: startmenu::menu_layout(rect.w, rect.h, dpi, 0, 0),
+                    state: startmenu::MenuState::default(),
+                    apps: Vec::new(),
+                    filtered: Vec::new(),
+                    hovered: None,
+                    mouse_tracking: false,
+                    visible: false,
+                    dismissed_at: 0,
+                });
+            }
+        });
+    }
+
+    let Some(hwnd) = STATE.with(move |s| {
+        let mut s = s.borrow_mut();
+        let m = s.as_mut()?.menu.as_mut()?;
+        m.filtered = (0..count).collect();
+        m.apps = apps;
+        m.state = startmenu::MenuState::default();
+        m.hovered = None;
+        m.dpi = dpi;
+        m.layout = startmenu::menu_layout(rect.w, rect.h, dpi, count, 0);
+        // A reopen on another monitor resizes the swapchain (no pump: D3D).
+        if m.size != (rect.w, rect.h) {
+            if let Err(e) = m.renderer.resize(rect.w, rect.h) {
+                log::error!("start menu swapchain resize failed: {e}");
+            }
+        }
+        m.size = (rect.w, rect.h);
+        m.visible = true;
+        Some(m.hwnd)
+    }) else {
+        return;
+    };
+
+    let hwnd = HWND(hwnd as _);
+    unsafe {
+        // No SWP_NOACTIVATE: unlike the bars, the menu wants the focus so
+        // typing filters and deactivation dismisses.
+        let _ = SetWindowPos(
+            hwnd,
+            if topmost { HWND_TOPMOST } else { HWND_TOP },
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            SWP_SHOWWINDOW,
+        );
+        if !SetForegroundWindow(hwnd).as_bool() {
+            // Focus lock (e.g. a posted, not real, click): the menu is up but
+            // keyboard and click-away dismissal won't work — Esc via a real
+            // focus later, another Start click, or launching still close it.
+            log::warn!("start menu: foreground refused; keyboard filter unavailable");
+        }
+    }
+    log::info!("start menu opened: {count} apps");
+    redraw_menu();
+}
+
+/// Hide the menu. Safe re-entrantly: the `visible` flag flips before the
+/// `ShowWindow` whose `WA_INACTIVE` re-enters this function.
+fn hide_menu() {
+    let hwnd = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let m = s.as_mut()?.menu.as_mut()?;
+        if !m.visible {
+            return None;
+        }
+        m.visible = false;
+        m.dismissed_at = tick_ms();
+        Some(m.hwnd)
+    });
+    if let Some(hwnd) = hwnd {
+        let _ = unsafe { ShowWindow(HWND(hwnd as _), SW_HIDE) };
+        log::info!("start menu closed");
+    }
+}
+
+/// Repaint the menu (no-op while hidden). Holds the borrow across the draw
+/// like `redraw_bars`; D2D/DXGI don't pump.
+fn redraw_menu() {
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(st) = s.as_mut() else { return };
+        let State { config, menu, .. } = st;
+        let Some(m) = menu.as_mut() else { return };
+        if !m.visible {
+            return;
+        }
+        let rows: Vec<MenuRow> = m
+            .layout
+            .rows
+            .iter()
+            .map(|(fidx, rect)| MenuRow {
+                rect: *rect,
+                name: m.apps[m.filtered[*fidx]].name.as_str(),
+                selected: *fidx == m.state.selected,
+                hovered: m.hovered == Some(*fidx),
+            })
+            .collect();
+        let frame = MenuFrame {
+            bar: &config.taskbar,
+            dpi: m.dpi,
+            search: m.layout.search,
+            filter: &m.state.filter,
+            rows: &rows,
+            scrollbar: m.layout.scrollbar,
+            no_matches: m.filtered.is_empty() && !m.state.filter.is_empty(),
+        };
+        match m.renderer.draw_menu(&frame) {
+            Ok(()) => {}
+            Err(e) if e.code() == D2DERR_RECREATE_TARGET => {
+                log::warn!("start menu render target lost; recreating renderer");
+                match Renderer::new(HWND(m.hwnd as _), m.size.0, m.size.1) {
+                    Ok(r) => {
+                        m.renderer = r;
+                        if let Err(e) = m.renderer.draw_menu(&frame) {
+                            log::error!("menu draw after renderer rebuild failed: {e}");
+                        }
+                    }
+                    Err(e) => log::error!("start menu renderer rebuild failed: {e:#}"),
+                }
+            }
+            Err(e) => log::error!("start menu draw failed: {e}"),
+        }
+    });
+}
+
+/// Recompute the filtered list and layout after the filter changed.
+fn refilter_menu(m: &mut StartMenu) {
+    m.filtered = apps::filter_indices(&m.apps, &m.state.filter);
+    m.hovered = None;
+    m.layout = startmenu::menu_layout(m.size.0, m.size.1, m.dpi, m.filtered.len(), m.state.scroll);
+}
+
+/// Launch the app at filtered index `fidx` (`None` = current selection) and
+/// dismiss the menu. The launch pumps; the path is snapshotted first.
+fn launch_from_menu(fidx: Option<usize>) {
+    let path = STATE.with(|s| {
+        let s = s.borrow();
+        let m = s.as_ref()?.menu.as_ref()?;
+        let idx = *m.filtered.get(fidx.unwrap_or(m.state.selected))?;
+        Some(m.apps.get(idx)?.path.clone())
+    });
+    if let Some(path) = path {
+        hide_menu();
+        winlist::launch_app(&path);
+    }
+}
+
+fn on_menu_key(wparam: WPARAM) {
+    let vk = wparam.0 as u16;
+    if vk == VK_ESCAPE.0 {
+        hide_menu();
+        return;
+    }
+    if vk == VK_RETURN.0 {
+        launch_from_menu(None);
+        return;
+    }
+    let delta = if vk == VK_UP.0 {
+        -1
+    } else if vk == VK_DOWN.0 {
+        1
+    } else {
+        return;
+    };
+    let changed = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(m) = s.as_mut().and_then(|st| st.menu.as_mut()) else {
+            return false;
+        };
+        let before = m.state.clone();
+        m.state
+            .move_selection(delta, m.filtered.len(), m.layout.fit);
+        if m.state == before {
+            return false;
+        }
+        m.layout =
+            startmenu::menu_layout(m.size.0, m.size.1, m.dpi, m.filtered.len(), m.state.scroll);
+        true
+    });
+    if changed {
+        redraw_menu();
+    }
+}
+
+fn on_menu_char(wparam: WPARAM) {
+    // WM_CHAR delivers UTF-16 units; a lone surrogate half isn't a char and
+    // is dropped (a filter can live without astral-plane characters).
+    let Some(c) = char::from_u32(wparam.0 as u32) else {
+        return;
+    };
+    let changed = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(m) = s.as_mut().and_then(|st| st.menu.as_mut()) else {
+            return false;
+        };
+        if !m.state.on_char(c) {
+            return false;
+        }
+        refilter_menu(m);
+        true
+    });
+    if changed {
+        redraw_menu();
+    }
+}
+
+fn on_menu_wheel(delta: i32) {
+    let rows = -delta / 120 * 3; // three rows per notch; wheel-up scrolls up
+    if rows == 0 {
+        return;
+    }
+    let changed = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(m) = s.as_mut().and_then(|st| st.menu.as_mut()) else {
+            return false;
+        };
+        let before = m.state.scroll;
+        m.state.on_wheel(rows, m.filtered.len(), m.layout.fit);
+        if m.state.scroll == before {
+            return false;
+        }
+        m.layout =
+            startmenu::menu_layout(m.size.0, m.size.1, m.dpi, m.filtered.len(), m.state.scroll);
+        // The row under the resting cursor changed; re-derived on next move.
+        m.hovered = None;
+        true
+    });
+    if changed {
+        redraw_menu();
+    }
+}
+
+fn on_menu_mouse_move(hwnd: HWND, x: i32, y: i32) {
+    let (hover_changed, arm) = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(m) = s.as_mut().and_then(|st| st.menu.as_mut()) else {
+            return (false, false);
+        };
+        let hovered = m.layout.hit_row(x, y);
+        let changed = hovered != m.hovered;
+        m.hovered = hovered;
+        let arm = !m.mouse_tracking;
+        m.mouse_tracking = true;
+        (changed, arm)
+    });
+    if arm {
+        let mut track = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        if unsafe { TrackMouseEvent(&mut track) }.is_err() {
+            STATE.with(|s| {
+                if let Some(m) = s.borrow_mut().as_mut().and_then(|st| st.menu.as_mut()) {
+                    m.mouse_tracking = false; // retry on the next move
+                }
+            });
+        }
+    }
+    if hover_changed {
+        redraw_menu();
+    }
+}
+
+extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_ACTIVATE => {
+            // Clicking anywhere else deactivates the menu — that IS dismissal.
+            if (wparam.0 & 0xffff) as u32 == WA_INACTIVE {
+                hide_menu();
+            }
+            // Always fall through: DefWindowProc's WM_ACTIVATE handling is
+            // what gives an activated window the keyboard focus.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_KEYDOWN => {
+            on_menu_key(wparam);
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            on_menu_char(wparam);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let hit = STATE.with(|s| {
+                s.borrow()
+                    .as_ref()
+                    .and_then(|st| st.menu.as_ref())
+                    .and_then(|m| m.layout.hit_row(mouse_x(lparam), mouse_y(lparam)))
+            });
+            if let Some(fidx) = hit {
+                launch_from_menu(Some(fidx));
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            on_menu_mouse_move(hwnd, mouse_x(lparam), mouse_y(lparam));
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            let had_hover = STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                let Some(m) = s.as_mut().and_then(|st| st.menu.as_mut()) else {
+                    return false;
+                };
+                m.mouse_tracking = false;
+                m.hovered.take().is_some()
+            });
+            if had_hover {
+                redraw_menu();
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            on_menu_wheel(((wparam.0 >> 16) as u16 as i16) as i32);
+            LRESULT(0)
+        }
+        // Deliberate teardown only (bar rebuild); never quits the pump.
+        WM_DESTROY => LRESULT(0),
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
 }
 
 // ---------------------------------------------------------------------------

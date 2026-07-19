@@ -599,6 +599,141 @@ impl Renderer {
     }
 }
 
+/// One visible start-menu row, precomputed by the bar: display name plus
+/// highlight state (the renderer never sees list indices or scroll math).
+pub struct MenuRow<'a> {
+    pub rect: BarRect,
+    pub name: &'a str,
+    pub selected: bool,
+    pub hovered: bool,
+}
+
+/// Everything one start-menu paint needs (ADR 0007). The menu derives its
+/// theme from the `[taskbar]` config; there is no menu config section yet.
+pub struct MenuFrame<'a> {
+    pub bar: &'a Taskbar,
+    pub dpi: u32,
+    /// The type-to-search box.
+    pub search: BarRect,
+    /// The typed filter; empty draws the hint text instead.
+    pub filter: &'a str,
+    pub rows: &'a [MenuRow<'a>],
+    /// Scrollbar thumb, when the list overflows.
+    pub scrollbar: Option<BarRect>,
+    /// True when a non-empty filter matched nothing (draws "No matches").
+    pub no_matches: bool,
+}
+
+impl Renderer {
+    /// Draw the start menu and present. Same device-loss contract as
+    /// [`Renderer::draw`]: `D2DERR_RECREATE_TARGET` bubbles up.
+    pub fn draw_menu(&mut self, f: &MenuFrame) -> windows::core::Result<()> {
+        let size = unsafe { self.dc.GetSize() };
+        // The menu floats over application windows; keep it readable by
+        // flooring the opacity above the bar's (often lower) setting.
+        let alpha = f.bar.alpha.max(0xf0) as f32 / 255.0;
+        let fill = config_color(f.bar.color, alpha);
+        let radius = layout::scale(f.bar.corner_radius, f.dpi) as f32;
+        unsafe {
+            self.dc.BeginDraw();
+            self.dc.Clear(Some(&color(0.0, 0.0, 0.0, 0.0)));
+            let brush = self.dc.CreateSolidColorBrush(&fill, None)?;
+            self.dc.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: size.width,
+                        bottom: size.height,
+                    },
+                    radiusX: radius,
+                    radiusY: radius,
+                },
+                &brush,
+            );
+            let text_brush = self
+                .dc
+                .CreateSolidColorBrush(&config_color(f.bar.text_color, 0.92), None)?;
+            let dim_brush = self
+                .dc
+                .CreateSolidColorBrush(&config_color(f.bar.text_color, 0.5), None)?;
+            let chip = self
+                .dc
+                .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.08), None)?;
+            let chip_radius = layout::scale(6, f.dpi) as f32;
+            let fill_chip = |r: &BarRect, active: bool, hovered: bool| {
+                chip.SetColor(&color(1.0, 1.0, 1.0, chip_alpha(active, hovered)));
+                self.dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: rect_f(r),
+                        radiusX: chip_radius,
+                        radiusY: chip_radius,
+                    },
+                    &chip,
+                );
+            };
+            let pad = layout::scale(10, f.dpi) as f32;
+            let padded = |r: &BarRect| {
+                let rect = rect_f(r);
+                D2D_RECT_F {
+                    left: rect.left + pad,
+                    right: rect.right - pad,
+                    ..rect
+                }
+            };
+
+            // Search box: the typed filter, or a dim hint while empty.
+            fill_chip(&f.search, false, false);
+            let label = self.text_format(12.0, f.dpi, DWRITE_TEXT_ALIGNMENT_LEADING)?;
+            if f.filter.is_empty() {
+                self.draw_text(
+                    "Type to search",
+                    &label,
+                    &padded(&f.search),
+                    &dim_brush,
+                    true,
+                );
+            } else {
+                self.draw_text(f.filter, &label, &padded(&f.search), &text_brush, true);
+            }
+
+            for row in f.rows {
+                fill_chip(&row.rect, row.selected, row.hovered);
+                self.draw_text(row.name, &label, &padded(&row.rect), &text_brush, true);
+            }
+            if f.no_matches {
+                // Where the first row would be; there are no rows to collide
+                // with when this is set.
+                let hint = BarRect {
+                    x: f.search.x,
+                    y: f.search.y + 2 * f.search.h,
+                    w: f.search.w,
+                    h: f.search.h,
+                };
+                self.draw_text("No matches", &label, &padded(&hint), &dim_brush, true);
+            }
+            if let Some(thumb) = &f.scrollbar {
+                let track = self
+                    .dc
+                    .CreateSolidColorBrush(&config_color(f.bar.text_color, 0.25), None)?;
+                let r = rect_f(thumb);
+                let radius = thumb.w as f32 / 2.0;
+                self.dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: r,
+                        radiusX: radius,
+                        radiusY: radius,
+                    },
+                    &track,
+                );
+            }
+            self.dc.EndDraw(None, None)?;
+            self.swapchain.Present(1, DXGI_PRESENT(0)).ok()?;
+        }
+        Ok(())
+    }
+}
+
 /// A square of `side` pixels centered inside `r`.
 fn centered(r: &BarRect, side: f32) -> D2D_RECT_F {
     let left = r.x as f32 + (r.w as f32 - side) / 2.0;

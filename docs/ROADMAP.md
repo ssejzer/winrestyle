@@ -91,10 +91,8 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       Hover via mouse-move hit-testing + `TrackMouseEvent` leave tracking.
       (2026-07-19; visual check at the next manual T3.)
 - [x] Start button (stub launch): leftmost square chip, four-pane glyph,
-      hover state; clicking taps the Win key — opens the system Start menu
-      unswapped, lands on nothing in a swapped session (the real menu is
-      `wr-startmenu`, Phase 4). (2026-07-19; visual + click check at the
-      next manual T3.)
+      hover state; clicking tapped the Win key. (2026-07-19; the stub was
+      replaced by the real menu in Phase 4 — see ADR 0007.)
 - [x] Overflow UI: dropped windows go behind a `»` chevron chip; clicking
       it opens a menu (bottom-aligned popup) and picking an entry focuses
       that window. Per-app *grouping* is deliberately deferred to a later
@@ -122,15 +120,16 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       multi-monitor verification needs hardware and rides the T3
       checklist. (2026-07-19.)
 
-## Phase 3 — Installer / manager UI ⭐ (code complete 2026-07-19; window rides next T3)
+## Phase 3 — Installer / manager UI ✅ (complete, VM-validated 2026-07-19)
 
 > Logic in cross-platform, unit-tested `wr-core` (`components`, `autostart`,
 > `manager`, `config` write + `Wallpaper.enabled`); a thin Direct2D
 > `wr-installer` window over it (`view.rs` pure + unit-tested like the taskbar's
-> `layout.rs`). Suite green on host + type-checked on the Windows target;
-> clippy/fmt clean. Automated **T16** covers the `--selftest` trial-run
-> primitive. The manager *window* — checklist, startup list, Restyle Now, Undo —
-> is visual and rides the next manual T3. No watchdog/IPC changes (ADR 0006).
+> `layout.rs`). No watchdog/IPC changes (ADR 0006). **Suite 30/30 + manual T3
+> pass 2026-07-19:** the manager window rendered, unchecking OneDrive and hitting
+> Restyle Now trial-ran + swapped, the swapped shell then logged
+> `2 launched, 1 disabled` (the opt-out round-tripped on the shared `entry_id`),
+> and `Win+Ctrl+F1` restored the Windows desktop.
 
 - [x] Component registry + `Component` trait (`install`/`uninstall`; the
       registry's `apply(base, selected)` is the plural "apply"). Taskbar,
@@ -146,11 +145,34 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       teardown reuses the proven restore + sweep + conditional-explorer path.)
 - [x] **This is where the target UX ships.** (Window visuals verify at T3.)
 
-## Phase 4+ — Beyond
+## Phase 4 — Start menu ⭐ (first slice code complete 2026-07-19; rides next T3)
 
-- [ ] Start menu (`wr-startmenu`).
+> A module of `wr-taskbar`, not a separate process (ADR 0007: a second process
+> would need an IPC channel the single-client pipe can't give it, and the menu
+> inherits the taskbar's supervision for free). Logic is pure + unit-tested
+> (`apps` = Start Menu folder merge/filter, `startmenu` = placement, scroll,
+> selection); the window is the bar's D2D/DComp idiom, but activatable so it
+> takes the keyboard and dismisses on deactivation.
+
+- [x] Start chip opens the menu in every session (the Win-key-tap stub is
+      gone): shortcut list from the user + machine `Programs` folders (user
+      shadows machine, explorer's merge rule), type-to-filter, Up/Down +
+      Enter, click-to-launch, wheel scroll + thumb, Esc / click-away /
+      re-click dismissal. Automated **T17** (open via posted click, close via
+      Esc); look + keyboard + swapped-session behavior at the next manual T3.
+      (2026-07-19.)
+- [ ] Row icons (needs an async loader — `SHGetFileInfoW` on shortcut targets
+      can block; letter chips until then).
+- [ ] Open via the Win key (needs a keyboard hook).
+- [ ] Pinned / recent sections; power controls (needs shutdown-privilege
+      handling; Ctrl+Alt+Del covers swapped sessions meanwhile).
+- [ ] `[startmenu]` config section (theme currently derives from `[taskbar]`).
+
+## Phase 5+ — Beyond
+
 - [ ] Theming engine (`wr-theme`): icons, accent colors, msstyles interop.
 - [ ] Icon packs & themes; live customization UI.
+- [ ] Multi-client IPC pipe → live apply from the manager (ADR 0006 deferral).
 - [ ] Plugin API for third-party components.
 - [ ] Code signing, packaging (MSI/winget), auto-update.
 

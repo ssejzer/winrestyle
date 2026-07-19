@@ -101,10 +101,20 @@ Phase 3 follows the same shape.
   clamping, hit-testing incl. scrolled content and footer exclusion) — green on
   the host and type-checked on `x86_64-pc-windows-msvc`.
 - Automated **T16** (VM harness): `wr-shell --selftest` validates config and
-  exits 0 — the trial-run primitive the swap depends on.
-- **Manual, next T3:** the window itself — checklist toggles, the startup-
-  programs list reflecting real Run/RunOnce/Startup entries, **Restyle Now**
-  through a real logon, and **Undo / Restore** bringing explorer back.
+  exits 0 — the trial-run primitive the swap depends on. Suite **30/30**,
+  2026-07-19.
+- **Manual T3 — passed 2026-07-19.** The manager window rendered correctly
+  (`manager window up (544x641, dpi 96)`): component checklist, and the real
+  logon entries listed with their source labels (SecurityHealth `Run (machine)`,
+  OneDrive `Run (user)`, MicrosoftEdgeAutoLaunch `Run (user)`). Unchecking
+  OneDrive and clicking **Restyle Now** ran the full sequence — trial
+  `--selftest` (pid logged), config written, `HKCU Shell` backed up + set, the
+  recovery dialog naming `Win + Ctrl + F1`. At the swapped logon the shell logged
+  `autostart: skipped hkcu-run:OneDrive (disabled in config)` →
+  `autostart done: 2 launched, 1 disabled, 0 failed` — the manager checkbox
+  round-tripped through config into the shell's launch filter on the *same*
+  `entry_id`, confirming the no-drift contract end-to-end. `Win + Ctrl + F1`
+  restored the standard Windows desktop.
 
 ## Consequences
 

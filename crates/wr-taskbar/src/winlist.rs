@@ -16,10 +16,6 @@ use windows::Win32::Graphics::Gdi::{
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    VK_LWIN,
-};
 use windows::Win32::UI::Shell::{SHGetFileInfoW, ShellExecuteW, SHFILEINFOW, SHGFI_ICON};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, EnumWindows, GetClassLongPtrW,
@@ -369,9 +365,10 @@ pub fn pinned_icon(path: &std::path::Path) -> Option<Icon> {
     }
 }
 
-/// Launch a pinned entry the way a double-click in explorer would.
-/// Fire-and-forget: failures land in the log, never in the bar.
-pub fn launch_pinned(path: &std::path::Path) {
+/// Launch a path the way a double-click in explorer would. Fire-and-forget:
+/// failures land in the log, never in the bar. `what` labels the log line
+/// ("pinned", "start menu") — tests key off these.
+fn launch(path: &std::path::Path, what: &str) {
     let wide = wide_path(path);
     let result = unsafe {
         ShellExecuteW(
@@ -386,13 +383,23 @@ pub fn launch_pinned(path: &std::path::Path) {
     // ShellExecuteW's contract: values <= 32 are error codes.
     if result.0 as usize <= 32 {
         log::warn!(
-            "pinned launch failed ({}): code {}",
+            "{what} launch failed ({}): code {}",
             path.display(),
             result.0 as usize
         );
     } else {
-        log::info!("pinned launch: {}", path.display());
+        log::info!("{what} launch: {}", path.display());
     }
+}
+
+/// Launch a pinned entry.
+pub fn launch_pinned(path: &std::path::Path) {
+    launch(path, "pinned");
+}
+
+/// Launch a start-menu entry.
+pub fn launch_app(path: &std::path::Path) {
+    launch(path, "start menu");
 }
 
 /// Show the overflow menu listing the window buttons that didn't fit, at
@@ -427,28 +434,5 @@ pub fn show_overflow_menu(bar: HWND, x: i32, y: i32, items: &[(isize, String)]) 
         let _ = DestroyMenu(menu);
         let id = picked.0 as usize;
         (id >= 1 && id <= items.len()).then(|| items[id - 1].0)
-    }
-}
-
-/// Stub Start action: tap the Win key. Unswapped this opens the system Start
-/// menu (explorer is running); in a swapped session no Start experience
-/// exists, so the tap lands on nothing — the real menu is `wr-startmenu`, a
-/// later phase.
-pub fn open_start_menu() {
-    let key = |flags: KEYBD_EVENT_FLAGS| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VK_LWIN,
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    };
-    let inputs = [key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)];
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    if sent != inputs.len() as u32 {
-        // Blocked by UIPI or an open secure desktop; nothing to recover.
-        log::warn!("start: SendInput injected {sent}/{} events", inputs.len());
     }
 }

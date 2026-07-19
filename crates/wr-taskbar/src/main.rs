@@ -5,14 +5,16 @@
 //! A rounded, translucent, config-themed bar (Direct2D on a DirectComposition
 //! swapchain, WARP fallback for GPU-less VMs) at the bottom of **every
 //! monitor** (per-monitor DPI, display-change rebuild). Left to right:
-//! Start button (stub: taps the Win key), pinned-app chips (config
-//! `pinned`, click to launch), window buttons — icon + ellipsized title,
-//! hover + foreground highlights, click to activate/minimize/restore, kept
-//! fresh event-driven via WinEvent hooks (`winlist`) — an overflow `»` menu
-//! when they don't fit, tray icons (hosted `Shell_NotifyIcon`, swapped
-//! sessions only; ADR 0005 amendment), and the clock with a date line.
-//! Optional DWM acrylic/mica backdrop and `text_color` theming. Per-app
-//! grouping, the appbar channel, and balloons are later polish — see
+//! Start button — opens the start menu (`startmenu` + `apps`, ADR 0007): a
+//! popup listing the Start Menu folders' shortcuts with type-to-filter,
+//! arrows/Enter, click-to-launch — pinned-app chips (config `pinned`, click
+//! to launch), window buttons — icon + ellipsized title, hover + foreground
+//! highlights, click to activate/minimize/restore, kept fresh event-driven
+//! via WinEvent hooks (`winlist`) — an overflow `»` menu when they don't
+//! fit, tray icons (hosted `Shell_NotifyIcon`, swapped sessions only; ADR
+//! 0005 amendment), and the clock with a date line. Optional DWM
+//! acrylic/mica backdrop and `text_color` theming. Per-app grouping, the
+//! appbar channel, balloons, and menu icons are later polish — see
 //! `docs/ROADMAP.md`.
 //!
 //! Spawned and supervised by `wr-shell` (ADR 0005). The taskbar is cosmetic:
@@ -26,12 +28,16 @@
 //!                         relaunch and crash-loop-give-up paths)
 //!   --exit-after=<secs>   exit cleanly after N seconds
 
+#[cfg_attr(not(windows), allow(dead_code))]
+mod apps;
 #[cfg(windows)]
 mod bar;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
 #[cfg(windows)]
 mod render;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod startmenu;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod tasks;
 #[cfg_attr(not(windows), allow(dead_code))]

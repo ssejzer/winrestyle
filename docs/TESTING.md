@@ -293,6 +293,12 @@ one pinned app) and start a fresh pair.
 
 ## T16 — Installer / manager UI  (Phase 3, ADR 0006)
 
+> Last passed 2026-07-19 (suite 30/30 + the manual window pass below): the
+> manager rendered, unchecking OneDrive + **Restyle Now** trial-ran and swapped,
+> the swapped shell logged `autostart done: 2 launched, 1 disabled` (the opt-out
+> round-tripped on the shared `entry_id`), and `Win + Ctrl + F1` restored the
+> desktop.
+
 The manager's safety-critical logic is unit-tested cross-platform
 (`wr-core::{components,autostart,manager,config}`, `wr-installer::view`); the
 window itself is Direct2D and can only be *seen* in the VM. So T16 splits:
@@ -327,6 +333,38 @@ window itself is Direct2D and can only be *seen* in the VM. So T16 splits:
    **Startup program** and re-applying makes the shell log
    `autostart: skipped <id> (disabled in config)` at the next swapped logon
    (ties back to T12).
+
+## T17 — Start menu  (Phase 4, ADR 0007)
+
+The menu is a window inside `wr-taskbar` (no new process, no IPC — ADR 0007);
+clicking the Start chip opens it in every session, swapped or not. Its logic is
+unit-tested cross-platform (`wr-taskbar::{apps,startmenu}`: folder merge with
+user-shadows-machine, filtering, placement, scroll/selection math); the window
+itself splits like the manager's:
+
+**Automated (in the harness):**
+
+1. The bar logs `start chip at x,y WxH (bar-local)`; the harness posts
+   `WM_LBUTTONDOWN` at the chip's center. ✅ Pass if the log shows
+   `start menu opened: N apps` (N > 0 on any real Windows install).
+2. Esc posted to the `WinRestyleStartMenu` window. ✅ Pass if the log shows
+   `start menu closed`.
+
+**Manual, once per release (rides T3):**
+
+3. ✅ Pass if a real click on the Start chip shows the menu above the bar:
+   a "Type to search" box and the alphabetical shortcut list (letter rows —
+   icons are a later slice), with hover highlight, wheel scrolling, and a
+   thumb when the list overflows.
+4. Typing filters the list live; Backspace un-filters; a non-matching filter
+   shows "No matches". Up/Down move the selection (scrolling to keep it
+   visible); **Enter** launches the selected entry and closes the menu
+   (`start menu launch: <path>` in the log). Clicking a row does the same.
+5. Dismissal: Esc closes; clicking anywhere outside (another window, the
+   desktop) closes; clicking the Start chip again closes without reopening.
+6. In a **swapped session** (during the T3 pass): the menu opens, lists the
+   same apps, and launches them — the Start experience explorer used to
+   provide.
 
 ## Resolved Phase 0 question
 

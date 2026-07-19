@@ -10,14 +10,16 @@
   T10/T11 (config load + hot reload over IPC; wallpaper paint + repaint),
   T12 (logon autostart + config opt-out, ADR 0004), T13 (taskbar surface
   supervision: spawn/paint, relaunch, crash-loop give-up, config opt-out,
-  ADR 0005), T14 (window buttons track opened/closed windows), and T15
+  ADR 0005), T14 (window buttons track opened/closed windows), T15
   (taskbar extras: pinned apps incl. a real click-to-launch, backdrop +
   date config, single-bar startup, tray host gated off while unswapped),
-  and T16 (Phase 3 installer trial-run primitive: wr-shell --selftest).
+  T16 (Phase 3 installer trial-run primitive: wr-shell --selftest), and
+  T17 (Phase 4 start menu: Start-chip click opens it, Esc closes it).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
-  desktop + Win+Ctrl+F1), the logged-in halves of T4, and the manager
-  *window* itself (T16 visual: checklist, startup list, Restyle Now / Undo).
+  desktop + Win+Ctrl+F1), the logged-in halves of T4, the manager *window*
+  itself (T16 visual: checklist, startup list, Restyle Now / Undo), and the
+  start menu's look + keyboard filter + launching (T17 visual).
 
   Run inside the disposable Windows 11 VM, from anywhere:
 
@@ -503,6 +505,39 @@ public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, Int
     $selftestOk = ($proc.ExitCode -eq 0) -and ((Get-Log $selftestLog) -match 'selftest ok')
     Record 'T16 shell --selftest validates config and exits 0' $selftestOk `
         "exit=$($proc.ExitCode)" -LogFile $selftestLog
+    Reset-TestEnv
+
+    # ---- T17: start menu opens and closes (Phase 4, ADR 0007) ---------------
+    # The menu is a window inside wr-taskbar; clicking the Start chip opens it
+    # in ALL sessions, so the unswapped suite can drive it. The bar logs the
+    # Start chip's geometry at startup ('start chip at x,y WxH (bar-local)');
+    # the menu logs its app count on open and 'start menu closed' on dismissal.
+    # Esc is posted straight to the menu window, so the test doesn't depend on
+    # the menu winning the foreground from a posted (not real) click.
+    Write-Section 'T17: start menu (Start chip click opens, Esc closes)'
+    Remove-Item $ConfigFile -ErrorAction SilentlyContinue   # defaults: taskbar enabled
+    $wd = Start-Watchdog -LogName 't17'
+    $up = Wait-Until { (Get-Log $wd.Log) -match 'taskbar painted: color ' } 25
+    $barWnd = [WRTest.U32]::FindWindowW('WinRestyleTaskbar', [NullString]::Value)
+    $opened = $false
+    $geom = [regex]::Match((Get-Log $wd.Log), 'start chip at (\d+),(\d+) (\d+)x(\d+)')
+    if ($barWnd -ne [IntPtr]::Zero -and $geom.Success) {
+        $cx = [int]$geom.Groups[1].Value + [int]([int]$geom.Groups[3].Value / 2)
+        $cy = [int]$geom.Groups[2].Value + [int]([int]$geom.Groups[4].Value / 2)
+        $lparam = [IntPtr](($cy -shl 16) -bor $cx)
+        [WRTest.U32]::PostMessageW($barWnd, 0x0201, [IntPtr]::Zero, $lparam) | Out-Null
+        $opened = Wait-Until { (Get-Log $wd.Log) -match 'start menu opened: \d+ apps' } 15
+    }
+    Record 'T17 clicking the Start chip opens the menu' ($up -and $opened) `
+        "painted=$up barWnd=$barWnd geom=$($geom.Success)" -LogFile $wd.Log
+    $menuWnd = [WRTest.U32]::FindWindowW('WinRestyleStartMenu', [NullString]::Value)
+    $closed = $false
+    if ($menuWnd -ne [IntPtr]::Zero) {
+        # WM_KEYDOWN, VK_ESCAPE.
+        [WRTest.U32]::PostMessageW($menuWnd, 0x0100, [IntPtr]0x1B, [IntPtr]::Zero) | Out-Null
+        $closed = Wait-Until { (Get-Log $wd.Log) -match 'start menu closed' } 15
+    }
+    Record 'T17 Esc closes the menu' $closed "menuWnd=$menuWnd" -LogFile $wd.Log
     Reset-TestEnv
 }
 finally {
