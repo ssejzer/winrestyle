@@ -1,11 +1,14 @@
 //! WinRestyle taskbar — the Phase 2 flagship surface.
 //!
-//! ## First slice
+//! ## Current state
 //!
 //! A rounded, translucent, config-themed bar (Direct2D on a DirectComposition
 //! swapchain, WARP fallback for GPU-less VMs) at the bottom of the primary
-//! screen, showing a clock. Window buttons, Start, pinned apps, and tray
-//! hosting arrive in later slices — see `docs/ROADMAP.md`.
+//! screen: a clock on the right, and window buttons — icon + ellipsized
+//! title, hover + foreground highlights, click to activate/minimize/restore,
+//! kept fresh event-driven via WinEvent hooks (`winlist`). Start button,
+//! pinned apps, acrylic, overflow grouping, and tray hosting arrive in later
+//! slices — see `docs/ROADMAP.md` (tray has a hard prereq in ADR 0005).
 //!
 //! Spawned and supervised by `wr-shell` (ADR 0005). The taskbar is cosmetic:
 //! a crash here is relaunched by the shell, and a crash-loop makes the shell
