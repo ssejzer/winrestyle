@@ -109,19 +109,80 @@ mod imp {
     }
 
     /// True if a desktop shell is on screen right now, detected via the
-    /// taskbar window class (`Shell_TrayWnd`) that explorer creates only when
-    /// running *as the shell* (not as a file manager). Recovery paths check
-    /// this before launching `explorer.exe`: when a live shell is already
-    /// present, a second explorer would not re-adopt the shell role — it
-    /// would just open a stray file-manager window. (A *hung* shell still
-    /// counts as present; recovering from a wedged explorer is not our
-    /// failure mode.)
+    /// taskbar window class (`Shell_TrayWnd`) that a shell creates only when
+    /// running *as the shell* (explorer as a file manager does not).
+    /// Recovery paths check this before launching `explorer.exe`: when a
+    /// live shell is already present, a second explorer would not re-adopt
+    /// the shell role — it would just open a stray file-manager window.
+    /// (A *hung* shell still counts as present; recovering from a wedged
+    /// explorer is not our failure mode.)
+    ///
+    /// Since tray hosting (ADR 0005 amendment), `wr-taskbar` creates a
+    /// `Shell_TrayWnd` of its own in swapped sessions, so *whose* window it
+    /// is matters. The policy, per candidate window:
+    ///
+    /// - owned by `wr-taskbar.exe` → **not** a desktop shell (it is us);
+    /// - owned by any other identifiable process → a desktop shell
+    ///   (explorer, or a third-party replacement that claimed the class —
+    ///   both mean a second explorer would only open a stray window);
+    /// - owner unresolvable (window or process mid-teardown, access denied)
+    ///   → **not** a desktop shell. The failure directions are asymmetric:
+    ///   the recovery sweep terminates `wr-taskbar.exe` *without waiting*,
+    ///   so a dying tray host of ours can be enumerable-but-unopenable at
+    ///   check time — counting it would make `recover()` (which runs at
+    ///   most once) skip launching explorer and strand the user with no
+    ///   shell at all, while not counting a real-but-unidentifiable shell
+    ///   merely opens one stray explorer window. We must always be able to
+    ///   put explorer back; when in doubt, launch it.
     pub fn desktop_shell_running() -> bool {
         use windows::core::w;
-        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
-        unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }
-            .map(|hwnd| !hwnd.is_invalid())
-            .unwrap_or(false)
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
+
+        unsafe {
+            let mut hwnd = HWND::default();
+            loop {
+                hwnd = match FindWindowExW(None, hwnd, w!("Shell_TrayWnd"), None) {
+                    Ok(h) if !h.is_invalid() => h,
+                    _ => return false, // no (further) tray windows at all
+                };
+                match window_owner_image(hwnd) {
+                    Some(image) if super::image_is_our_taskbar(&image) => {}
+                    Some(_) => return true,
+                    None => {}
+                }
+            }
+        }
+    }
+
+    /// Full image path of the process owning `hwnd`, or `None` when it
+    /// cannot be resolved (window or process already gone, access denied).
+    unsafe fn window_owner_image(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let image = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .ok()
+        .map(|()| String::from_utf16_lossy(&buf[..len as usize]));
+        let _ = CloseHandle(process);
+        image
     }
 
     /// Restore the per-user shell to exactly what it was before WinRestyle, and
@@ -194,3 +255,37 @@ mod imp {
 pub use imp::{
     backup_and_set_shell, desktop_shell_running, has_backup, read_user_shell, restore_shell,
 };
+
+/// Whether a full process image path names our own taskbar executable
+/// (`wr-taskbar.exe`, the only WinRestyle binary that ever creates a
+/// `Shell_TrayWnd`). Case-insensitive on the basename only.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn image_is_our_taskbar(path: &str) -> bool {
+    path.rsplit(['\\', '/'])
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case(crate::TASKBAR_EXE))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_is_our_taskbar;
+
+    #[test]
+    fn our_taskbar_image_matching() {
+        assert!(image_is_our_taskbar(
+            r"C:\Program Files\WinRestyle\wr-taskbar.exe"
+        ));
+        assert!(image_is_our_taskbar(r"D:\builds\WR-TASKBAR.EXE"));
+        assert!(image_is_our_taskbar("wr-taskbar.exe"));
+        // Forward slashes appear in some query paths.
+        assert!(image_is_our_taskbar("C:/x/wr-taskbar.exe"));
+
+        // Explorer and third-party shells are NOT ours — they count as
+        // desktop shells in desktop_shell_running.
+        assert!(!image_is_our_taskbar(r"C:\Windows\explorer.exe"));
+        assert!(!image_is_our_taskbar(r"C:\shells\litestep.exe"));
+        assert!(!image_is_our_taskbar(r"C:\evil\notwr-taskbar.exe.bak"));
+        assert!(!image_is_our_taskbar(r"C:\wr-taskbar.exe\payload.exe"));
+        assert!(!image_is_our_taskbar(""));
+    }
+}

@@ -102,6 +102,19 @@ pub struct Taskbar {
     /// Gap between the bar and the screen's bottom/side edges. `0` = docked
     /// edge to edge.
     pub margin: u32,
+    /// System-drawn material behind the bar (DWM system backdrop). With
+    /// `acrylic`/`mica`, a lower `alpha` lets the material show through, and
+    /// DWM rounds the window corners itself (its radius is ~8 px at 96 DPI,
+    /// so a similar `corner_radius` blends best).
+    pub backdrop: Backdrop,
+    /// Text and glyph color (clock, titles, Start glyph).
+    pub text_color: Color,
+    /// Show the date under the clock.
+    pub show_date: bool,
+    /// Pinned app launchers, drawn as icon chips after the Start button.
+    /// Paths to executables, shortcuts, or documents; opened like a
+    /// double-click in explorer.
+    pub pinned: Vec<PathBuf>,
 }
 
 impl Default for Taskbar {
@@ -117,8 +130,29 @@ impl Default for Taskbar {
             alpha: 0xe0,
             corner_radius: 12,
             margin: 8,
+            backdrop: Backdrop::None,
+            text_color: Color {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+            },
+            show_date: true,
+            pinned: Vec::new(),
         }
     }
+}
+
+/// `[taskbar] backdrop` — which system material DWM draws behind the bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backdrop {
+    /// No system material; the bar's own translucent fill only.
+    #[default]
+    None,
+    /// Acrylic (blur of whatever is behind the bar).
+    Acrylic,
+    /// Mica (desktop-tinted, more opaque than acrylic).
+    Mica,
 }
 
 /// An sRGB color, written in TOML as `"#rrggbb"`.
@@ -339,7 +373,38 @@ mod tests {
         let taskbar = toml::from_str::<Config>("").unwrap().taskbar;
         assert!(taskbar.enabled);
         assert!(taskbar.height > 0);
+        assert_eq!(taskbar.backdrop, Backdrop::None);
+        assert!(taskbar.pinned.is_empty());
+        assert!(taskbar.show_date);
         assert_eq!(taskbar, Taskbar::default());
+    }
+
+    #[test]
+    fn taskbar_extras_parse() {
+        let config: Config = toml::from_str(
+            "[taskbar]\nbackdrop = \"acrylic\"\ntext_color = \"#c0ffee\"\n\
+             show_date = false\npinned = ['C:\\Windows\\notepad.exe', 'D:\\app.lnk']\n",
+        )
+        .unwrap();
+        assert_eq!(config.taskbar.backdrop, Backdrop::Acrylic);
+        assert_eq!(config.taskbar.text_color.to_string(), "#c0ffee");
+        assert!(!config.taskbar.show_date);
+        assert_eq!(
+            config.taskbar.pinned,
+            vec![
+                PathBuf::from(r"C:\Windows\notepad.exe"),
+                PathBuf::from(r"D:\app.lnk"),
+            ]
+        );
+        let mica: Config = toml::from_str("[taskbar]\nbackdrop = \"mica\"\n").unwrap();
+        assert_eq!(mica.taskbar.backdrop, Backdrop::Mica);
+    }
+
+    #[test]
+    fn bad_backdrop_is_a_parse_error() {
+        // Same policy as bad colors: the whole file is rejected, and the
+        // startup/reload fallback rules take over.
+        assert!(toml::from_str::<Config>("[taskbar]\nbackdrop = \"frosted\"\n").is_err());
     }
 
     #[test]

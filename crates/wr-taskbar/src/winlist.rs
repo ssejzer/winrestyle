@@ -8,6 +8,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
@@ -19,15 +20,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VK_LWIN,
 };
+use windows::Win32::UI::Shell::{SHGetFileInfoW, ShellExecuteW, SHFILEINFOW, SHGFI_ICON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassLongPtrW, GetClassNameW, GetForegroundWindow, GetIconInfo, GetWindow,
-    GetWindowLongPtrW, GetWindowTextW, IsIconic, IsWindowVisible, PostMessageW,
-    SendMessageTimeoutW, SetForegroundWindow, ShowWindow, SwitchToThisWindow, EVENT_OBJECT_CLOAKED,
-    EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_UNCLOAKED,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GCLP_HICON,
-    GCLP_HICONSM, GWL_EXSTYLE, GW_OWNER, HICON, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2,
-    OBJID_WINDOW, SMTO_ABORTIFHUNG, SW_MINIMIZE, SW_RESTORE, WINEVENT_OUTOFCONTEXT,
-    WINEVENT_SKIPOWNPROCESS, WM_APP, WM_GETICON, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, EnumWindows, GetClassLongPtrW,
+    GetClassNameW, GetForegroundWindow, GetIconInfo, GetWindow, GetWindowLongPtrW, GetWindowTextW,
+    IsIconic, IsWindowVisible, PostMessageW, SendMessageTimeoutW, SetForegroundWindow, ShowWindow,
+    SwitchToThisWindow, TrackPopupMenu, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_CREATE,
+    EVENT_OBJECT_HIDE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE,
+    GW_OWNER, HICON, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, MF_STRING, OBJID_WINDOW,
+    SMTO_ABORTIFHUNG, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_GETICON, WM_NULL,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use crate::tasks::{self, ClickAction, Icon, TaskWindow};
@@ -126,6 +130,12 @@ fn cloaked(hwnd: HWND) -> bool {
 /// The current foreground window as a raw handle (0 if none).
 pub fn foreground() -> isize {
     unsafe { GetForegroundWindow().0 as isize }
+}
+
+/// Point the hooks' change notifications at a different bar window (after a
+/// display-change rebuild replaces the windows the hooks were aimed at).
+pub fn retarget(bar: HWND) {
+    BAR_HWND.store(bar.0 as isize, Ordering::SeqCst);
 }
 
 /// Install the WinEvent hooks that keep the button list fresh. Must run on
@@ -317,6 +327,106 @@ pub fn activate(hwnd_raw: isize) {
 unsafe fn focus(hwnd: HWND) {
     if !SetForegroundWindow(hwnd).as_bool() {
         SwitchToThisWindow(hwnd, true);
+    }
+}
+
+/// Decode a *foreign* `HICON` (a tray registration's, owned by the sending
+/// process — shared, never destroyed here) into renderable pixels.
+pub fn foreign_icon_pixels(hicon_raw: isize) -> Option<Icon> {
+    unsafe { icon_pixels(HICON(hicon_raw as _)) }
+}
+
+/// NUL-terminated UTF-16 for a path, losslessly (`encode_wide` preserves
+/// unpaired surrogates that a `to_string_lossy` round-trip would mangle).
+fn wide_path(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Extract a pinned launcher's icon (exe, shortcut, or document) as
+/// renderable pixels. `None` renders as a letter chip. Unlike window icons,
+/// the returned `HICON` is ours and must be destroyed.
+pub fn pinned_icon(path: &std::path::Path) -> Option<Icon> {
+    let wide = wide_path(path);
+    let mut info = SHFILEINFOW::default();
+    unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut info),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON,
+        );
+        if info.hIcon.is_invalid() {
+            return None;
+        }
+        let pixels = icon_pixels(info.hIcon);
+        let _ = DestroyIcon(info.hIcon);
+        pixels
+    }
+}
+
+/// Launch a pinned entry the way a double-click in explorer would.
+/// Fire-and-forget: failures land in the log, never in the bar.
+pub fn launch_pinned(path: &std::path::Path) {
+    let wide = wide_path(path);
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            PCWSTR(wide.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW's contract: values <= 32 are error codes.
+    if result.0 as usize <= 32 {
+        log::warn!(
+            "pinned launch failed ({}): code {}",
+            path.display(),
+            result.0 as usize
+        );
+    } else {
+        log::info!("pinned launch: {}", path.display());
+    }
+}
+
+/// Show the overflow menu listing the window buttons that didn't fit, at
+/// screen coordinates `(x, y)` (bottom-aligned). Returns the chosen window.
+/// Blocks pumping messages until dismissed — the caller must hold no STATE
+/// borrow.
+pub fn show_overflow_menu(bar: HWND, x: i32, y: i32, items: &[(isize, String)]) -> Option<isize> {
+    if items.is_empty() {
+        return None;
+    }
+    unsafe {
+        let menu = CreatePopupMenu().ok()?;
+        for (i, (_, title)) in items.iter().enumerate() {
+            let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            // Command ids start at 1; 0 is TrackPopupMenu's "dismissed".
+            let _ = AppendMenuW(menu, MF_STRING, i + 1, PCWSTR(wide.as_ptr()));
+        }
+        // The standard dance for menus on a non-activated window: take
+        // foreground so the menu dismisses on an outside click, and post a
+        // no-op message afterwards so the menu loop exits cleanly.
+        let _ = SetForegroundWindow(bar);
+        let picked = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_BOTTOMALIGN,
+            x,
+            y,
+            0,
+            bar,
+            None,
+        );
+        let _ = PostMessageW(bar, WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        let id = picked.0 as usize;
+        (id >= 1 && id <= items.len()).then(|| items[id - 1].0)
     }
 }
 

@@ -1,6 +1,7 @@
 # ADR 0005 — The taskbar is a supervised child process
 
-Date: 2026-07-19. Status: accepted.
+Date: 2026-07-19. Status: accepted. Amended 2026-07-19 (tray hosting; see
+bottom).
 
 ## Context
 
@@ -73,6 +74,8 @@ and the idempotence of `recover()`. **Before any tray work, that check must
 distinguish explorer's tray window from ours** (e.g. by window process image
 name), and this ADR must be amended with the chosen mechanism.
 
+> **Resolved by the 2026-07-19 amendment below.**
+
 ## Rendering (context, not a decision)
 
 First slice renders via D3D11 → premultiplied-alpha composition swapchain →
@@ -87,3 +90,54 @@ Automated T13 (spawn/paint, relaunch, crash-loop give-up, config opt-out)
 T7 failure that led to the sweep→spawn window amendment in ADR 0002. Visual
 half — bar on screen, and **no bar left after `Win+Ctrl+F1`** — at the next
 manual T3.
+
+## Amendment (2026-07-19) — tray hosting and the reworked shell check
+
+Tray hosting shipped, with the hazard above resolved as follows.
+
+1. **`desktop_shell_running()` now identifies each tray window's owner.**
+   It walks *every* top-level `Shell_TrayWnd` with `FindWindowExW` and
+   resolves each owner process (`GetWindowThreadProcessId` →
+   `OpenProcess` → `QueryFullProcessImageNameW`). Per window:
+   - owned by `wr-taskbar.exe` (basename, case-insensitive; unit-tested)
+     → **not** a desktop shell — it is our own tray host;
+   - owned by any *other* identifiable process → a desktop shell. This
+     keeps the old "any `Shell_TrayWnd` counts" semantics for explorer
+     *and* third-party shells (a LiteStep-style session must not get a
+     stray explorer launched over it);
+   - owner unresolvable → **not** a desktop shell. This direction was
+     chosen deliberately: the recovery sweep (`kill_all_named`) terminates
+     `wr-taskbar.exe` *without waiting*, so our dying tray host can be
+     enumerable-but-unopenable at the exact moment `recover()` checks.
+     Counting it would make recovery — which runs at most once — skip
+     launching explorer and strand the user shell-less; not counting a
+     real-but-unidentifiable shell merely opens one stray file-manager
+     window. The prime invariant ("we must always be able to put explorer
+     back") decides the tie: when in doubt, launch it.
+
+2. **The tray host is a separate, hidden `Shell_TrayWnd` window** created
+   by the taskbar **only in swapped sessions** (the same
+   `desktop_shell_running()` probe that decides topmost). Unswapped, the
+   host is never created: two live tray windows would fight for every
+   app's `Shell_NotifyIcon` registration and could hijack icons from the
+   dev machine's real taskbar. Consequence: the automated (unswapped)
+   suite cannot exercise the host end-to-end; the wire-format parser and
+   icon registry are pure and unit-tested instead, and the live half rides
+   the manual T3 checklist.
+
+3. **Protocol scope of this first slice.** `WM_COPYDATA` with `dwData == 1`
+   (`NIM_ADD`/`MODIFY`/`DELETE`/`SETVERSION`, both the modern 956-byte and
+   the ancient 152-byte `NOTIFYICONDATA` layouts, 32-bit wire handles
+   sign-extended); `TaskbarCreated` broadcast at host start so running
+   apps re-register; icons drawn right of the window buttons; L/R
+   mouse down/up forwarded in the owner's negotiated encoding (legacy or
+   `NOTIFYICON_VERSION_4`); owners polled for liveness on the clock tick
+   so a crashed app's icon disappears. Not hosted yet: the appbar channel
+   (`dwData == 0`, work-area negotiation), balloon notifications
+   (`NIF_INFO` is parsed and ignored), `NIS_SHAREDICON`, and keyboard
+   focus (`NIM_SETFOCUS` is a deliberate no-op).
+
+4. **Failure posture.** The host window failing to create logs a warning
+   and disables hosting; nothing else changes. A malformed or hostile
+   registration buffer parses to `None` and is dropped — the parser is
+   length-checked everywhere and fuzz-shaped unit tests pin that.

@@ -4,10 +4,11 @@
 //! fallback so GPU-less VMs still render) backs a premultiplied-alpha
 //! composition swapchain; DirectComposition puts the swapchain on the window;
 //! Direct2D draws into the swapchain's back buffer. Translucency and rounded
-//! corners come for free from the alpha channel — true acrylic/blur is a
-//! later Phase 2 refinement.
+//! corners come from the alpha channel; the optional acrylic/mica material
+//! behind them is DWM's (`bar::apply_backdrop`), not ours.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use windows::core::{w, Interface};
@@ -33,7 +34,7 @@ use windows::Win32::Graphics::DirectComposition::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TRIMMING,
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
@@ -49,32 +50,63 @@ use windows::Win32::Graphics::Dxgi::{
 
 use wr_core::config::Taskbar;
 
-use crate::layout::{self, BarRect};
+use crate::layout::{self, BarLayout, BarRect, Hit};
 use crate::tasks::{Icon, TaskWindow};
+
+/// A tray icon ready to draw: identity key plus decoded pixels (`None` while
+/// the owner's icon is missing or undecodable — drawn as an empty cell).
+pub struct TrayItem<'a> {
+    /// Stable identity for the bitmap cache: (owner hwnd, icon uid).
+    pub key: (isize, u32),
+    /// Bumped by the bar whenever the owner swaps the icon (`NIM_MODIFY`),
+    /// so the cache re-uploads instead of serving the stale image.
+    pub rev: u32,
+    pub icon: Option<&'a Icon>,
+}
 
 /// Everything one paint needs, so `draw` doesn't grow a parameter per slice.
 pub struct Frame<'a> {
     pub bar: &'a Taskbar,
     pub clock: &'a str,
+    /// Second line under the clock; empty hides it.
+    pub date: &'a str,
     pub dpi: u32,
     pub tasks: &'a [TaskWindow],
-    /// Bar-local chip rectangles; `rects[i]` belongs to `tasks[i]` (the tail
-    /// of `tasks` may have no rect when the bar overflows).
-    pub rects: &'a [BarRect],
-    /// Square for the Start button at the bar's left edge.
-    pub start: BarRect,
+    /// Where everything sits; `layout.tasks[i]` belongs to `tasks[i]` (the
+    /// tail of `tasks` may have no chip when the bar overflows).
+    pub layout: &'a BarLayout,
     /// Raw handle of the foreground window (highlighted chip), 0 for none.
     pub active: isize,
     /// Decoded icons per window; `Some(None)` remembers "asked, has none".
     pub icons: &'a HashMap<isize, Option<Icon>>,
-    /// Index of the chip under the mouse, if any.
-    pub hovered: Option<usize>,
-    /// Whether the mouse is over the Start button.
-    pub start_hovered: bool,
+    /// Pinned launchers in config order, with their decoded icons.
+    pub pinned: &'a [(PathBuf, Option<Icon>)],
+    /// Tray icons in cell order (`layout.tray[i]` belongs to `tray[i]`).
+    pub tray: &'a [TrayItem<'a>],
+    /// The element under the mouse, if any.
+    pub hovered: Option<Hit>,
 }
 
 fn color(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
+}
+
+fn config_color(c: wr_core::config::Color, a: f32) -> D2D1_COLOR_F {
+    color(
+        c.r as f32 / 255.0,
+        c.g as f32 / 255.0,
+        c.b as f32 / 255.0,
+        a,
+    )
+}
+
+fn rect_f(r: &BarRect) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: r.x as f32,
+        top: r.y as f32,
+        right: (r.x + r.w) as f32,
+        bottom: (r.y + r.h) as f32,
+    }
 }
 
 /// Chip fill strength: resting, hovered, focused, focused-and-hovered.
@@ -98,6 +130,11 @@ pub struct Renderer {
     /// Uploaded window icons, keyed by window handle. Pruned as windows
     /// close; dies (correctly) with the renderer on a device-loss rebuild.
     icon_bitmaps: HashMap<isize, ID2D1Bitmap1>,
+    /// Uploaded pinned-launcher icons, keyed by path.
+    pinned_bitmaps: HashMap<PathBuf, ID2D1Bitmap1>,
+    /// Uploaded tray icons, keyed by (owner hwnd, uid), with the revision
+    /// they were uploaded at.
+    tray_bitmaps: HashMap<(isize, u32), (u32, ID2D1Bitmap1)>,
     // Held only to keep the composition tree alive for the window's lifetime.
     _dcomp: IDCompositionDevice,
     _dcomp_target: IDCompositionTarget,
@@ -156,6 +193,8 @@ impl Renderer {
             target: None,
             dwrite,
             icon_bitmaps: HashMap::new(),
+            pinned_bitmaps: HashMap::new(),
+            tray_bitmaps: HashMap::new(),
             _dcomp: dcomp,
             _dcomp_target: dcomp_target,
             _visual: visual,
@@ -201,20 +240,16 @@ impl Renderer {
         self.bind_target()
     }
 
-    /// Draw the bar — rounded translucent fill, the Start button,
-    /// window-button chips, and the right-aligned clock — and present.
-    /// `D2DERR_RECREATE_TARGET` bubbles up so the caller can rebuild the
-    /// renderer.
+    /// Draw the bar — rounded translucent fill, Start button, pinned chips,
+    /// window-button chips, overflow chevron, tray icons, and the clock —
+    /// and present. `D2DERR_RECREATE_TARGET` bubbles up so the caller can
+    /// rebuild the renderer.
     pub fn draw(&mut self, f: &Frame) -> windows::core::Result<()> {
-        self.sync_icon_cache(f);
+        self.sync_icon_caches(f);
         let size = unsafe { self.dc.GetSize() };
-        let fill = color(
-            f.bar.color.r as f32 / 255.0,
-            f.bar.color.g as f32 / 255.0,
-            f.bar.color.b as f32 / 255.0,
-            f.bar.alpha as f32 / 255.0,
-        );
+        let fill = config_color(f.bar.color, f.bar.alpha as f32 / 255.0);
         let radius = layout::scale(f.bar.corner_radius, f.dpi) as f32;
+        let l = f.layout;
         unsafe {
             self.dc.BeginDraw();
             self.dc.Clear(Some(&color(0.0, 0.0, 0.0, 0.0)));
@@ -234,37 +269,34 @@ impl Renderer {
             );
             let text_brush = self
                 .dc
-                .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.92), None)?;
+                .CreateSolidColorBrush(&config_color(f.bar.text_color, 0.92), None)?;
+            // One chip brush, recolored per element (they only differ in
+            // alpha).
+            let chip = self
+                .dc
+                .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.08), None)?;
             let chip_radius = layout::scale(6, f.dpi) as f32;
-
-            // Start button: the same chip treatment as the window buttons,
-            // with a four-pane Windows-style glyph. Clicking it is a stub
-            // launch for now (the real menu is a later phase).
-            {
-                let s = f.start;
-                let rect = D2D_RECT_F {
-                    left: s.x as f32,
-                    top: s.y as f32,
-                    right: (s.x + s.w) as f32,
-                    bottom: (s.y + s.h) as f32,
-                };
-                let chip = self.dc.CreateSolidColorBrush(
-                    &color(1.0, 1.0, 1.0, chip_alpha(false, f.start_hovered)),
-                    None,
-                )?;
+            let fill_chip = |r: &BarRect, active: bool, hovered: bool| {
+                chip.SetColor(&color(1.0, 1.0, 1.0, chip_alpha(active, hovered)));
                 self.dc.FillRoundedRectangle(
                     &D2D1_ROUNDED_RECT {
-                        rect,
+                        rect: rect_f(r),
                         radiusX: chip_radius,
                         radiusY: chip_radius,
                     },
                     &chip,
                 );
+            };
+
+            // Start button: chip + four-pane Windows-style glyph.
+            fill_chip(&l.start, false, f.hovered == Some(Hit::Start));
+            {
+                let rect = rect_f(&l.start);
                 let glyph = layout::scale(14, f.dpi) as f32;
                 let gap = layout::scale(2, f.dpi).max(1) as f32;
                 let pane = ((glyph - gap) / 2.0).max(1.0);
-                let gx = rect.left + (s.w as f32 - glyph) / 2.0;
-                let gy = rect.top + (s.h as f32 - glyph) / 2.0;
+                let gx = rect.left + (l.start.w as f32 - glyph) / 2.0;
+                let gy = rect.top + (l.start.h as f32 - glyph) / 2.0;
                 for (ix, iy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     let left = gx + ix as f32 * (pane + gap);
                     let top = gy + iy as f32 * (pane + gap);
@@ -280,39 +312,55 @@ impl Renderer {
                 }
             }
 
-            // Window buttons: translucent white chips over the bar color —
-            // brighter when hovered, brighter still for the foreground
-            // window — with the window icon (when it has one) before the
-            // title. Theming comes later.
-            if !f.rects.is_empty() {
-                let chip = self
-                    .dc
-                    .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.08), None)?;
+            // Pinned launchers: icon centered in a square chip; a letter chip
+            // when the icon couldn't be extracted. The letter format is
+            // built at most once per paint, not per chip.
+            let pinned_icon_size = layout::scale(20, f.dpi) as f32;
+            let mut letter_format: Option<IDWriteTextFormat> = None;
+            for (i, ((path, _), r)) in f.pinned.iter().zip(&l.pinned).enumerate() {
+                fill_chip(r, false, f.hovered == Some(Hit::Pinned(i)));
+                if let Some(bitmap) = self.pinned_bitmaps.get(path) {
+                    self.dc.DrawBitmap(
+                        bitmap,
+                        Some(&centered(r, pinned_icon_size)),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        None,
+                        None,
+                    );
+                } else {
+                    let letter: String = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().chars().take(1).collect())
+                        .unwrap_or_default();
+                    let format = match &letter_format {
+                        Some(existing) => existing,
+                        None => letter_format.insert(self.text_format(
+                            13.0,
+                            f.dpi,
+                            DWRITE_TEXT_ALIGNMENT_CENTER,
+                        )?),
+                    };
+                    self.draw_text(
+                        &letter.to_uppercase(),
+                        format,
+                        &rect_f(r),
+                        &text_brush,
+                        false,
+                    );
+                }
+            }
+
+            // Window buttons: chip (brighter when hovered, brighter still for
+            // the foreground window) + icon + ellipsized title.
+            if !l.tasks.is_empty() {
                 let label = self.text_format(12.0, f.dpi, DWRITE_TEXT_ALIGNMENT_LEADING)?;
                 let pad = layout::scale(10, f.dpi) as f32;
                 let icon_size = layout::scale(16, f.dpi) as f32;
                 let icon_gap = layout::scale(6, f.dpi) as f32;
-                for (i, (task, r)) in f.tasks.iter().zip(f.rects).enumerate() {
-                    let rect = D2D_RECT_F {
-                        left: r.x as f32,
-                        top: r.y as f32,
-                        right: (r.x + r.w) as f32,
-                        bottom: (r.y + r.h) as f32,
-                    };
-                    chip.SetColor(&color(
-                        1.0,
-                        1.0,
-                        1.0,
-                        chip_alpha(task.hwnd == f.active, f.hovered == Some(i)),
-                    ));
-                    self.dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect,
-                            radiusX: chip_radius,
-                            radiusY: chip_radius,
-                        },
-                        &chip,
-                    );
+                for (i, (task, r)) in f.tasks.iter().zip(&l.tasks).enumerate() {
+                    let rect = rect_f(r);
+                    fill_chip(r, task.hwnd == f.active, f.hovered == Some(Hit::Task(i)));
                     let mut text_left = rect.left + pad;
                     if let Some(bitmap) = self.icon_bitmaps.get(&task.hwnd) {
                         let top = rect.top + (rect.bottom - rect.top - icon_size) / 2.0;
@@ -331,9 +379,8 @@ impl Renderer {
                         );
                         text_left += icon_size + icon_gap;
                     }
-                    let title: Vec<u16> = task.title.encode_utf16().collect();
-                    self.dc.DrawText(
-                        &title,
+                    self.draw_text(
+                        &task.title,
                         &label,
                         &D2D_RECT_F {
                             left: text_left,
@@ -341,38 +388,114 @@ impl Renderer {
                             ..rect
                         },
                         &text_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        DWRITE_MEASURING_MODE_NATURAL,
+                        true, // clip: titles overflow their chip
                     );
                 }
             }
 
-            let clock_format = self.text_format(14.0, f.dpi, DWRITE_TEXT_ALIGNMENT_TRAILING)?;
+            // Overflow chevron for the windows whose chips didn't fit.
+            if let Some(r) = &l.overflow {
+                fill_chip(r, false, f.hovered == Some(Hit::Overflow));
+                let format = self.text_format(13.0, f.dpi, DWRITE_TEXT_ALIGNMENT_CENTER)?;
+                self.draw_text("\u{00bb}", &format, &rect_f(r), &text_brush, false);
+            }
+
+            // Tray icons.
+            let tray_icon_size = layout::scale(16, f.dpi) as f32;
+            for (i, (item, r)) in f.tray.iter().zip(&l.tray).enumerate() {
+                if f.hovered == Some(Hit::Tray(i)) {
+                    fill_chip(r, false, true);
+                }
+                if let Some((_, bitmap)) = self.tray_bitmaps.get(&item.key) {
+                    self.dc.DrawBitmap(
+                        bitmap,
+                        Some(&centered(r, tray_icon_size)),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        None,
+                        None,
+                    );
+                }
+            }
+
+            // Clock, right-aligned; the date slides in underneath when shown.
             let pad = layout::scale(16, f.dpi) as f32;
-            let text: Vec<u16> = f.clock.encode_utf16().collect();
-            self.dc.DrawText(
-                &text,
-                &clock_format,
-                &D2D_RECT_F {
-                    left: pad,
-                    top: 0.0,
-                    right: size.width - pad,
-                    bottom: size.height,
-                },
+            let clock_rect = |top: f32, bottom: f32| D2D_RECT_F {
+                left: pad,
+                top,
+                right: size.width - pad,
+                bottom,
+            };
+            let show_date = !f.date.is_empty();
+            let time_bottom = if show_date {
+                size.height * 0.56
+            } else {
+                size.height
+            };
+            let time_format = self.text_format(
+                if show_date { 13.0 } else { 14.0 },
+                f.dpi,
+                DWRITE_TEXT_ALIGNMENT_TRAILING,
+            )?;
+            self.draw_text(
+                f.clock,
+                &time_format,
+                &clock_rect(0.0, time_bottom),
                 &text_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
+                false,
             );
+            if show_date {
+                let date_format = self.text_format(9.0, f.dpi, DWRITE_TEXT_ALIGNMENT_TRAILING)?;
+                let dim = self
+                    .dc
+                    .CreateSolidColorBrush(&config_color(f.bar.text_color, 0.72), None)?;
+                self.draw_text(
+                    f.date,
+                    &date_format,
+                    &clock_rect(time_bottom, size.height),
+                    &dim,
+                    false,
+                );
+            }
             self.dc.EndDraw(None, None)?;
             self.swapchain.Present(1, DXGI_PRESENT(0)).ok()?;
         }
         Ok(())
     }
 
-    /// Upload icons for windows that just appeared and drop entries for
-    /// windows that are gone. Runs before `BeginDraw`; upload failures mean
-    /// a text-only chip, never a draw error.
-    fn sync_icon_cache(&mut self, f: &Frame) {
+    /// Draw one string with the bar's standard text options; every text
+    /// element routes through here so options can't silently diverge
+    /// between elements. `clip` is for text that can overflow its rect
+    /// (window titles).
+    fn draw_text(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: &D2D_RECT_F,
+        brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush,
+        clip: bool,
+    ) {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            self.dc.DrawText(
+                &units,
+                format,
+                rect,
+                brush,
+                if clip {
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP
+                } else {
+                    D2D1_DRAW_TEXT_OPTIONS_NONE
+                },
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    /// Upload icons that just appeared and drop entries that are gone, for
+    /// all three icon families. Runs before `BeginDraw`; upload failures
+    /// mean an icon-less chip, never a draw error.
+    fn sync_icon_caches(&mut self, f: &Frame) {
         self.icon_bitmaps
             .retain(|hwnd, _| f.tasks.iter().any(|t| t.hwnd == *hwnd));
         for task in f.tasks {
@@ -382,33 +505,65 @@ impl Renderer {
             let Some(Some(icon)) = f.icons.get(&task.hwnd) else {
                 continue;
             };
-            let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                ..Default::default()
-            };
-            let bitmap = unsafe {
-                self.dc.CreateBitmap(
-                    D2D_SIZE_U {
-                        width: icon.width,
-                        height: icon.height,
-                    },
-                    Some(icon.bgra.as_ptr().cast()),
-                    icon.width * 4,
-                    &props,
-                )
-            };
-            match bitmap {
-                Ok(b) => {
-                    self.icon_bitmaps.insert(task.hwnd, b);
-                }
-                Err(e) => log::debug!("icon upload failed for {:?}: {e}", task.title),
+            if let Some(b) = self.upload(icon) {
+                self.icon_bitmaps.insert(task.hwnd, b);
             }
         }
+
+        self.pinned_bitmaps
+            .retain(|path, _| f.pinned.iter().any(|(p, _)| p == path));
+        for (path, icon) in f.pinned {
+            if self.pinned_bitmaps.contains_key(path) {
+                continue;
+            }
+            if let Some(b) = icon.as_ref().and_then(|i| self.upload(i)) {
+                self.pinned_bitmaps.insert(path.clone(), b);
+            }
+        }
+
+        self.tray_bitmaps
+            .retain(|key, _| f.tray.iter().any(|t| t.key == *key));
+        for item in f.tray {
+            let Some(icon) = item.icon else { continue };
+            // NIM_MODIFY swaps the image under the same key; the revision
+            // says whether the cached upload is still the current image.
+            if self
+                .tray_bitmaps
+                .get(&item.key)
+                .is_some_and(|(rev, _)| *rev == item.rev)
+            {
+                continue;
+            }
+            if let Some(b) = self.upload(icon) {
+                self.tray_bitmaps.insert(item.key, (item.rev, b));
+            }
+        }
+    }
+
+    /// Upload one decoded icon as a premultiplied D2D bitmap.
+    fn upload(&self, icon: &Icon) -> Option<ID2D1Bitmap1> {
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            ..Default::default()
+        };
+        unsafe {
+            self.dc.CreateBitmap(
+                D2D_SIZE_U {
+                    width: icon.width,
+                    height: icon.height,
+                },
+                Some(icon.bgra.as_ptr().cast()),
+                icon.width * 4,
+                &props,
+            )
+        }
+        .map_err(|e| log::debug!("icon upload failed: {e}"))
+        .ok()
     }
 
     /// A single-line, vertically centered text format with ellipsis trimming,
@@ -441,6 +596,18 @@ impl Renderer {
             format.SetTrimming(&trimming, &ellipsis)?;
             Ok(format)
         }
+    }
+}
+
+/// A square of `side` pixels centered inside `r`.
+fn centered(r: &BarRect, side: f32) -> D2D_RECT_F {
+    let left = r.x as f32 + (r.w as f32 - side) / 2.0;
+    let top = r.y as f32 + (r.h as f32 - side) / 2.0;
+    D2D_RECT_F {
+        left,
+        top,
+        right: left + side,
+        bottom: top + side,
     }
 }
 

@@ -3,13 +3,17 @@
 //! ## Current state
 //!
 //! A rounded, translucent, config-themed bar (Direct2D on a DirectComposition
-//! swapchain, WARP fallback for GPU-less VMs) at the bottom of the primary
-//! screen: a Start button on the left (stub: taps the Win key), a clock on
-//! the right, and window buttons — icon + ellipsized title, hover +
-//! foreground highlights, click to activate/minimize/restore, kept fresh
-//! event-driven via WinEvent hooks (`winlist`). Pinned apps, acrylic,
-//! overflow grouping, and tray hosting arrive in later slices — see
-//! `docs/ROADMAP.md` (tray has a hard prereq in ADR 0005).
+//! swapchain, WARP fallback for GPU-less VMs) at the bottom of **every
+//! monitor** (per-monitor DPI, display-change rebuild). Left to right:
+//! Start button (stub: taps the Win key), pinned-app chips (config
+//! `pinned`, click to launch), window buttons — icon + ellipsized title,
+//! hover + foreground highlights, click to activate/minimize/restore, kept
+//! fresh event-driven via WinEvent hooks (`winlist`) — an overflow `»` menu
+//! when they don't fit, tray icons (hosted `Shell_NotifyIcon`, swapped
+//! sessions only; ADR 0005 amendment), and the clock with a date line.
+//! Optional DWM acrylic/mica backdrop and `text_color` theming. Per-app
+//! grouping, the appbar channel, and balloons are later polish — see
+//! `docs/ROADMAP.md`.
 //!
 //! Spawned and supervised by `wr-shell` (ADR 0005). The taskbar is cosmetic:
 //! a crash here is relaunched by the shell, and a crash-loop makes the shell
@@ -30,6 +34,8 @@ mod layout;
 mod render;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod tasks;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod tray;
 #[cfg(windows)]
 mod winlist;
 

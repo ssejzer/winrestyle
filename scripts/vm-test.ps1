@@ -10,7 +10,9 @@
   T10/T11 (config load + hot reload over IPC; wallpaper paint + repaint),
   T12 (logon autostart + config opt-out, ADR 0004), T13 (taskbar surface
   supervision: spawn/paint, relaunch, crash-loop give-up, config opt-out,
-  ADR 0005), and T14 (window buttons track opened/closed windows).
+  ADR 0005), T14 (window buttons track opened/closed windows), and T15
+  (taskbar extras: pinned apps incl. a real click-to-launch, backdrop +
+  date config, single-bar startup, tray host gated off while unswapped).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
   desktop + Win+Ctrl+F1) and the logged-in halves of T4.
@@ -421,6 +423,64 @@ try {
     $removed = Wait-Until { (Get-Log $wd.Log) -match 'window removed: .*WinRestyleT14' } 15
     Record 'T14 new window becomes a taskbar button' $added -LogFile $wd.Log
     Record 'T14 closed window drops its button' $removed -LogFile $wd.Log
+    Reset-TestEnv
+
+    # ---- T15: taskbar extras (pinned, backdrop, date, bars, tray gating) ----
+    # Unswapped smoke of the Phase 2 completion slices: the extras config
+    # must start cleanly, pin an app (and launch it on a real click, posted
+    # as WM_LBUTTONDOWN at the pinned square), apply/report the backdrop,
+    # create exactly one bar on the single-monitor VM, and - the safety
+    # assertion - NOT host a Shell_TrayWnd while explorer's desktop is live.
+    Write-Section 'T15: taskbar extras (pinned apps, backdrop, tray gating)'
+    $pinnedExe = @("$env:WINDIR\System32\notepad.exe", "$env:WINDIR\notepad.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $pinnedExe) { $pinnedExe = "$env:WINDIR\System32\cmd.exe" }
+    $pinnedName = [IO.Path]::GetFileNameWithoutExtension($pinnedExe)
+    $script:ConfigTouched = $true
+    # TOML single-quoted strings are literal (no escape processing): write
+    # the path exactly as a user would, single backslashes.
+    Set-Content $ConfigFile ("[taskbar]`nbackdrop = `"acrylic`"`nshow_date = true`n" +
+        "pinned = ['" + $pinnedExe + "']")
+    $preLaunch = @(Get-Process $pinnedName -ErrorAction SilentlyContinue).Id
+    $wd = Start-Watchdog -LogName 't15'
+    $up = Wait-Until { (Get-Log $wd.Log) -match 'taskbar painted: color ' } 25
+    $oneBar   = (Get-Log $wd.Log) -match 'taskbar up: 1 bar\(s\)'
+    $trayOff  = (Get-Log $wd.Log) -match 'tray host off'
+    $pinnedOk = (Get-Log $wd.Log) -match 'pinned apps: 1'
+    # The backdrop path must run and settle either way (applied, or cleanly
+    # unavailable on this build) - never crash the bar.
+    $backdrop = (Get-Log $wd.Log) -match 'backdrop applied: Acrylic|backdrop: system backdrop unavailable'
+    Record 'T15 extras config paints with one bar' ($up -and $oneBar) `
+        "painted=$up oneBar=$oneBar" -LogFile $wd.Log
+    Record 'T15 pinned app loaded' $pinnedOk -LogFile $wd.Log
+    Record 'T15 backdrop applied or cleanly unavailable' $backdrop -LogFile $wd.Log
+    Record 'T15 tray host stays off while unswapped' $trayOff -LogFile $wd.Log
+
+    # Click the pinned square. The bar logs its geometry at startup
+    # ('pinned[0] chip at x,y WxH (bar-local)') precisely so this test never
+    # re-derives layout constants or DPI math.
+    Add-Type -Namespace WRTest -Name U32 -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
+[DllImport("user32.dll")]
+public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+'@
+    $barWnd = [WRTest.U32]::FindWindowW('WinRestyleTaskbar', $null)
+    $clicked = $false
+    $geom = [regex]::Match((Get-Log $wd.Log), 'pinned\[0\] chip at (\d+),(\d+) (\d+)x(\d+)')
+    if ($barWnd -ne [IntPtr]::Zero -and $geom.Success) {
+        $cx = [int]$geom.Groups[1].Value + [int]([int]$geom.Groups[3].Value / 2)
+        $cy = [int]$geom.Groups[2].Value + [int]([int]$geom.Groups[4].Value / 2)
+        $lparam = [IntPtr](($cy -shl 16) -bor $cx)
+        [WRTest.U32]::PostMessageW($barWnd, 0x0201, [IntPtr]::Zero, $lparam) | Out-Null
+        $clicked = Wait-Until { (Get-Log $wd.Log) -match 'pinned launch: ' } 15
+    }
+    Record 'T15 clicking the pinned square launches the app' $clicked `
+        "barWnd=$barWnd geom=$($geom.Success)" -LogFile $wd.Log
+    # Reap whatever the click started so it never outlives the suite.
+    Get-Process $pinnedName -ErrorAction SilentlyContinue |
+        Where-Object { $preLaunch -notcontains $_.Id } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
     Reset-TestEnv
 }
 finally {

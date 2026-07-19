@@ -67,7 +67,11 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 - [x] Direct2D/DirectComposition rendering, first slice: premultiplied-alpha
       composition swapchain (WARP fallback for GPU-less VMs), rounded
       translucent themed bar, DPI-aware, DirectWrite clock. (2026-07-19.)
-- [ ] Acrylic/blur backdrop; richer theming.
+- [x] Acrylic/mica backdrop + richer theming: `backdrop = "acrylic"|"mica"|
+      "none"` via the documented DWM system-backdrop API (graceful log-and-
+      fall-back on builds without it), `text_color`. Deeper theming is the
+      Phase 4 engine. (2026-07-19; T15 asserts the code path, visuals at
+      the next manual T3.)
 - [x] Running-window enumeration → buttons; activate / minimize / restore.
       Event-driven (WinEvent hooks, no polling); stable button order;
       overflow drops the tail (grouping UI later); foreground chip
@@ -83,14 +87,32 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       unswapped, lands on nothing in a swapped session (the real menu is
       `wr-startmenu`, Phase 4). (2026-07-19; visual + click check at the
       next manual T3.)
-- [ ] Overflow/grouping UI.
-- [ ] Widgets beyond the clock (shipped with the first slice).
-- [ ] Pinned apps.
-- [ ] **System tray hosting** (`Shell_TrayWnd` / `Shell_NotifyIcon` protocol).
-      Prereq recorded in ADR 0005: `desktop_shell_running()` must first learn
-      to tell explorer's `Shell_TrayWnd` from ours, or recovery idempotence
-      breaks.
-- [ ] Multi-monitor + per-monitor DPI.
+- [x] Overflow UI: dropped windows go behind a `»` chevron chip; clicking
+      it opens a menu (bottom-aligned popup) and picking an entry focuses
+      that window. Per-app *grouping* is deliberately deferred to a later
+      polish pass — the overflow menu removes the lost-window problem.
+      (2026-07-19.)
+- [x] Widgets beyond the clock: date line (Eng. weekday/day/month) under
+      the clock, `show_date` opt-out. Further widgets (battery, volume…)
+      belong to later phases. (2026-07-19.)
+- [x] Pinned apps: `pinned = [paths]`, icon chips after the Start button
+      (SHGetFileInfo icons, letter fallback), click launches via
+      `ShellExecuteW`. Pin/unpin UI is Phase 3 (manager) — config-only for
+      now. (2026-07-19; T15 covers load + a real posted click.)
+- [x] **System tray hosting** first slice (`Shell_TrayWnd` /
+      `Shell_NotifyIcon`): swapped sessions only; NIM add/modify/delete/
+      setversion (modern + ancient wire layouts, parser unit-tested),
+      TaskbarCreated broadcast, icons right of the buttons, L/R click
+      forwarding (legacy + v4 encodings), dead-owner pruning. Prereq
+      resolved: `desktop_shell_running()` now counts only explorer-owned
+      tray windows (ADR 0005 amendment). Appbar channel + balloons are
+      out of scope for this slice. (2026-07-19; live behavior verifies at
+      the next manual T3 — the automated suite runs unswapped by design.)
+- [x] Multi-monitor + per-monitor DPI: one bar per monitor
+      (`EnumDisplayMonitors`), per-bar swapchain/DPI/hover, display-change
+      rebuild. Single-monitor VM asserts one-bar behavior (T15); real
+      multi-monitor verification needs hardware and rides the T3
+      checklist. (2026-07-19.)
 
 ## Phase 3 — Installer / manager UI
 

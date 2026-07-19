@@ -36,7 +36,9 @@ and must reimplement or re-host it:
 - **System tray** — apps register icons via `Shell_NotifyIcon`, which messages a
   window of class `Shell_TrayWnd`. To receive tray icons we must create that
   window and speak the `TB_*` / `APPBAR` / copydata protocol ourselves. This is
-  the hardest single piece and is scheduled explicitly (Phase 2).
+  the hardest single piece. First slice shipped in Phase 2 (icon registry +
+  clicks, swapped sessions only; ADR 0005 amendment); the appbar channel and
+  balloons remain.
 - **Logon startup programs** — explorer runs the user's autostart *at shell
   start*: the `Run` / `RunOnce` keys (HKCU + HKLM) and the per-user + common
   Startup folders, plus session helpers such as `rdpclip.exe`. As the shell we
@@ -75,8 +77,13 @@ runaway cap — and the relaunched watchdog's stray sweep converges the pair bac
 to exactly one of each. Hangs are detected by the pipe heartbeat (ADR 0003) and
 *converted into deaths*; inside the watchdog, per-thread liveness stamps ensure
 a partially hung watchdog blames itself, not the shell. Recovery is idempotent:
-`explorer.exe` is only launched if no live desktop shell (`Shell_TrayWnd`) is
-already on screen.
+`explorer.exe` is only launched if no live desktop shell is already on
+screen — a `Shell_TrayWnd` window owned by any identifiable process that
+isn't our own `wr-taskbar.exe` (explorer or a third-party shell). Windows
+whose owner cannot be resolved do NOT count: the sweep terminates our
+taskbar without waiting, and mistaking our dying tray host for a shell
+would make one-shot recovery skip explorer entirely — the worse failure by
+far (ADR 0005 amendment has the full argument).
 
 > **Concurrency invariant:** the watchdog must never hold the child-handle lock
 > across a blocking `wait()`. The recovery path (hotkey / crash-loop) needs that
@@ -180,9 +187,10 @@ message to the surface's window class (ADR 0005) — no second pipe.
 - Watchdog liveness: **decided** — mutual supervision (ADR 0002; Winlogon's
   `AutoRestartShell` proved not to apply to custom per-user shells) plus
   heartbeat-based hang detection over the pipe (ADR 0003).
-- Tray hosting completeness vs. effort (full `Shell_TrayWnd` protocol
-  coverage). Hard prereq recorded in ADR 0005: `desktop_shell_running()`
-  detects a live desktop via the `Shell_TrayWnd` class, so once *we* create
-  one, recovery must be able to tell ours from explorer's.
-- Multi-monitor + DPI strategy for the taskbar.
+- Tray hosting completeness vs. effort. The prereq (recovery telling our
+  `Shell_TrayWnd` from explorer's) is **resolved** and the first slice is
+  in (ADR 0005 amendment); still open: the appbar channel (work-area
+  negotiation), balloons, `NIS_SHAREDICON`.
+- Multi-monitor + DPI: **decided** — one bar per monitor, per-monitor DPI,
+  display-change rebuild (needs hardware validation).
 - Code signing / Defender + SmartScreen mitigation before public release.

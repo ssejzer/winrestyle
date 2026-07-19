@@ -19,13 +19,13 @@ pub const EMERGENCY_HOTKEY_LABEL: &str = "Win + Ctrl + F1";
 pub const SHELL_EXE: &str = "wr-shell.exe";
 pub const TASKBAR_EXE: &str = "wr-taskbar.exe";
 
-/// Window class of the taskbar's top-level window. The shell finds the bar by
-/// this class to forward config-change notifications.
+/// Window class of the taskbar's top-level bar windows. The shell finds the
+/// bar by this class to forward config-change notifications.
 ///
-/// Deliberately NOT `Shell_TrayWnd` (yet): that class is how recovery paths
-/// detect a live *explorer* desktop (`shell::desktop_shell_running`). Claiming
-/// it is the Phase 2 tray-hosting milestone and needs that check reworked
-/// first (see ADR 0005).
+/// Deliberately NOT `Shell_TrayWnd`: the tray host is a *separate* hidden
+/// window the taskbar creates only in swapped sessions, and
+/// `shell::desktop_shell_running` counts only explorer-owned `Shell_TrayWnd`
+/// windows as a live desktop (ADR 0005 amendment).
 pub const TASKBAR_WINDOW_CLASS: &str = "WinRestyleTaskbar";
 
 /// Name of the registered window message (`RegisterWindowMessageW`) the shell

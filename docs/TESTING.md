@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 ```
 
 It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
-T5–T14** against the real binaries (no shell swap, no re-logon needed) and
+T5–T15** against the real binaries (no shell swap, no re-logon needed) and
 prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
 Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
 
@@ -248,6 +248,46 @@ real windows either way — unswapped it simply sits non-topmost).
    the highlight clears when the mouse leaves the bar; clicking a button
    focuses that window, clicking the focused window's button minimizes it,
    clicking a minimized window's button restores it.
+
+## T15 — Taskbar extras: pinned, backdrop, date, bars, tray gating  (Phase 2)
+
+No registry swap needed. Automated smoke of the Phase 2 completion slices,
+unswapped: write an extras config (`backdrop = "acrylic"`, `show_date`,
+one pinned app) and start a fresh pair.
+
+1. ✅ Pass if the bar paints (`taskbar painted`), reports **exactly one
+   bar** on the single-monitor VM (`taskbar up: 1 bar(s)`), and logs
+   `pinned apps: 1`.
+2. ✅ Pass if the backdrop path settles either way — `backdrop applied:
+   Acrylic`, or `backdrop: system backdrop unavailable` on builds without
+   `DWMWA_SYSTEMBACKDROP_TYPE` — and never crashes the bar.
+3. **Safety assertion:** ✅ Pass if the log shows `tray host off` — the
+   `Shell_TrayWnd` host must never be created while explorer's desktop is
+   live (ADR 0005 amendment; two tray windows would fight for icon
+   registrations).
+4. The harness posts a real `WM_LBUTTONDOWN` at the center of the pinned
+   square, taking the coordinates from the bar's own startup log line
+   (`pinned[0] chip at x,y WxH (bar-local)`) so it never re-derives layout
+   or DPI math. ✅ Pass if `pinned launch:` is logged (the app itself is
+   reaped afterwards).
+5. What the harness can't cover (verify at the manual T3 release pass, in a
+   *swapped* session):
+   - **Tray:** `tray host active` + `broadcast TaskbarCreated` in the log;
+     icons of running tray apps appear right of the window buttons within
+     seconds; left/right-clicking a tray icon opens that app's usual
+     popup/menu; killing the app makes its icon vanish within ~2 s.
+   - **Backdrop:** with `backdrop = "acrylic"` and a lower `alpha`
+     (e.g. 140), the area behind the bar blurs; `"mica"` gives the flatter
+     desktop-tinted look; `"none"` is today's translucent fill.
+   - **Date + theming:** the date line renders under the clock;
+     `text_color` recolors clock/titles/glyph.
+   - **Overflow:** open enough windows to overflow the bar — a `»` chip
+     appears; clicking it lists the dropped windows and picking one
+     focuses it.
+   - **Multi-monitor** (needs real hardware, not the VM): one bar per
+     monitor, correct position/DPI per monitor; unplugging/plugging a
+     monitor rebuilds the bars (`rebuilding bars (display change)`);
+     windows keep working (buttons on every bar list all windows).
 
 ## Resolved Phase 0 question
 
