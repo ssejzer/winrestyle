@@ -360,9 +360,20 @@ itself splits like the manager's:
 
 1. The bar logs `start chip at x,y WxH (bar-local)`; the harness posts
    `WM_LBUTTONDOWN` at the chip's center. ✅ Pass if the log shows
-   `start menu opened: N apps` (N > 0 on any real Windows install).
-2. Esc posted to the `WinRestyleStartMenu` window. ✅ Pass if the log shows
+   `start menu opened: N apps, M actions` (N > 0 on any real Windows install).
+   Both the pinned-click (T15) and this one re-acquire the bar window + latest
+   geometry right before posting and retry, so a mid-test display-change
+   rebuild (e.g. resizing a Hyper-V enhanced session) doesn't flake them.
+2. ✅ Pass if `M actions` > 0 — the built-in actions (ADR 0007 amendment). The
+   release binaries run from a `target\` tree, so `dev_mode` is on and all four
+   (Restore, settings, terminal, run-tests) show.
+3. Esc posted to the `WinRestyleStartMenu` window. ✅ Pass if the log shows
    `start menu closed`.
+
+**Manual (rides T3):** running an action — **Restore Windows desktop** brings
+the standard desktop back mid-session (spawns `wr-installer deactivate`);
+**WinRestyle settings** opens the manager; the dev actions open a terminal /
+launch the suite. Actions filter and launch by keyboard like apps.
 
 **Manual, once per release (rides T3):**
 

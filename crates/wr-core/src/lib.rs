@@ -22,6 +22,9 @@ pub const EMERGENCY_HOTKEY_LABEL: &str = "Win + Ctrl + F1";
 pub const WATCHDOG_EXE: &str = "wr-watchdog.exe";
 pub const SHELL_EXE: &str = "wr-shell.exe";
 pub const TASKBAR_EXE: &str = "wr-taskbar.exe";
+/// The installer/manager, spawned by the taskbar's start-menu actions
+/// (ADR 0007 follow-up) to run `deactivate`/open the manager.
+pub const INSTALLER_EXE: &str = "wr-installer.exe";
 
 /// Window class of the taskbar's top-level bar windows. The shell finds the
 /// bar by this class to forward config-change notifications.

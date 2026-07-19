@@ -606,6 +606,10 @@ pub struct MenuRow<'a> {
     pub name: &'a str,
     pub selected: bool,
     pub hovered: bool,
+    /// A built-in WinRestyle action (Restore, settings, dev helpers) rather
+    /// than a scanned app — drawn with a resting chip so the action group
+    /// reads as buttons, with a divider after the last one.
+    pub accent: bool,
 }
 
 /// Everything one start-menu paint needs (ADR 0007). The menu derives its
@@ -697,9 +701,25 @@ impl Renderer {
                 self.draw_text(f.filter, &label, &padded(&f.search), &text_brush, true);
             }
 
-            for row in f.rows {
-                fill_chip(&row.rect, row.selected, row.hovered);
+            for (i, row) in f.rows.iter().enumerate() {
+                // Action rows always carry a resting chip (hovered=true floor)
+                // so they read as buttons; apps only tint on hover/selection.
+                fill_chip(&row.rect, row.selected, row.hovered || row.accent);
                 self.draw_text(row.name, &label, &padded(&row.rect), &text_brush, true);
+                // Divider between the action group and the app list.
+                if row.accent && f.rows.get(i + 1).is_some_and(|n| !n.accent) {
+                    let y = (row.rect.y + row.rect.h) as f32 + layout::scale(1, f.dpi) as f32;
+                    let t = layout::scale(1, f.dpi).max(1) as f32;
+                    self.dc.FillRectangle(
+                        &D2D_RECT_F {
+                            left: row.rect.x as f32,
+                            top: y,
+                            right: (row.rect.x + row.rect.w) as f32,
+                            bottom: y + t,
+                        },
+                        &dim_brush,
+                    );
+                }
             }
             if f.no_matches {
                 // Where the first row would be; there are no rows to collide

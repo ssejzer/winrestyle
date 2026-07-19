@@ -402,6 +402,121 @@ pub fn launch_app(path: &std::path::Path) {
     launch(path, "start menu");
 }
 
+/// Whether this is a development build — the running exe lives under a
+/// `target\` build tree. Gates the dev-only start-menu actions (a shipped
+/// install never sits under `target`).
+pub fn dev_mode() -> bool {
+    std::env::current_exe()
+        .ok()
+        .map(|p| {
+            p.components().any(|c| {
+                c.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("target")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// The repo root in a dev build: the parent of the `target\` directory the
+/// exe sits under. `None` in a shipped install (no `target` ancestor).
+fn repo_root() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let target = exe.ancestors().find(|a| {
+        a.file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("target"))
+    })?;
+    target.parent().map(std::path::Path::to_path_buf)
+}
+
+/// `ShellExecuteW open` with optional parameters and working directory.
+/// Fire-and-forget; the launched process is independent of this one (so a
+/// `Restore` action survives the taskbar's own teardown). `what` labels the
+/// log line.
+fn shell_exec(
+    exe: &std::path::Path,
+    params: Option<&str>,
+    dir: Option<&std::path::Path>,
+    what: &str,
+) {
+    let exe_w = wide_path(exe);
+    let params_w = params.map(|p| {
+        p.encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    });
+    let dir_w = dir.map(wide_path);
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            PCWSTR(exe_w.as_ptr()),
+            params_w
+                .as_ref()
+                .map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr())),
+            dir_w
+                .as_ref()
+                .map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as usize <= 32 {
+        log::warn!("{what} failed: ShellExecuteW code {}", result.0 as usize);
+    } else {
+        log::info!("start menu action: {what}");
+    }
+}
+
+/// Run a built-in start-menu action (ADR 0007 follow-up). Spawns a detached
+/// process — `wr-installer` for the admin actions, PowerShell for the dev
+/// ones — so it outlives the taskbar even when the action tears the family
+/// down. No `STATE` borrow may be held (ShellExecuteW pumps).
+pub fn run_menu_action(kind: crate::actions::ActionKind) {
+    use crate::actions::ActionKind;
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let installer = dir.map(|d| d.join(wr_core::INSTALLER_EXE));
+    match kind {
+        ActionKind::Restore => match installer {
+            Some(exe) => shell_exec(&exe, Some("deactivate"), None, "Restore Windows desktop"),
+            None => log::warn!("start menu: cannot locate {}", wr_core::INSTALLER_EXE),
+        },
+        ActionKind::Settings => match installer {
+            Some(exe) => shell_exec(&exe, None, None, "WinRestyle settings"),
+            None => log::warn!("start menu: cannot locate {}", wr_core::INSTALLER_EXE),
+        },
+        ActionKind::Terminal => {
+            let root = repo_root();
+            shell_exec(
+                std::path::Path::new("powershell.exe"),
+                Some("-NoExit"),
+                root.as_deref(),
+                "Open terminal here",
+            );
+        }
+        ActionKind::RunTests => {
+            let Some(root) = repo_root() else {
+                log::warn!("start menu: no repo root; cannot run tests");
+                return;
+            };
+            let script = root.join("scripts").join("vm-test.ps1");
+            // Can't rebuild while swapped (running .exes are locked), so
+            // -SkipBuild; -NoExit keeps the results visible.
+            let params = format!(
+                "-NoExit -ExecutionPolicy Bypass -File \"{}\" -SkipPull -SkipBuild -SkipUnit",
+                script.display()
+            );
+            shell_exec(
+                std::path::Path::new("powershell.exe"),
+                Some(&params),
+                Some(&root),
+                "Run VM test suite",
+            );
+        }
+    }
+}
+
 /// Show the overflow menu listing the window buttons that didn't fit, at
 /// screen coordinates `(x, y)` (bottom-aligned). Returns the chosen window.
 /// Blocks pumping messages until dismissed — the caller must hold no STATE

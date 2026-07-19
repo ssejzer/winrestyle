@@ -139,6 +139,26 @@ public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName)
 public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 '@
 
+# Post a left-click at the CURRENT bar window, on the centre of the LATEST
+# chip matching $GeomPattern in the log. A mid-test display-change rebuilds
+# the bar (fresh HWND + geometry - seen resizing a Hyper-V enhanced session),
+# so both are re-read here, right before the post, not captured once up front.
+# PowerShell marshals $null as String.Empty for string params, so [NullString]
+# passes a real NULL and FindWindowW matches on class alone. Returns whether a
+# click was posted (false = no bar window or no geometry logged yet).
+function Send-BarChipClick([string]$Log, [string]$GeomPattern) {
+    $bar = [WRTest.U32]::FindWindowW('WinRestyleTaskbar', [NullString]::Value)
+    if ($bar -eq [IntPtr]::Zero) { return $false }
+    $m = [regex]::Matches((Get-Log $Log), $GeomPattern)
+    if ($m.Count -eq 0) { return $false }
+    $g = $m[$m.Count - 1].Groups
+    $cx = [int]$g[1].Value + [int]([int]$g[3].Value / 2)
+    $cy = [int]$g[2].Value + [int]([int]$g[4].Value / 2)
+    $lp = [IntPtr](($cy -shl 16) -bor $cx)
+    [WRTest.U32]::PostMessageW($bar, 0x0201, [IntPtr]::Zero, $lp) | Out-Null  # WM_LBUTTONDOWN
+    return $true
+}
+
 # env_logger writes to stderr; children (wr-shell, and any watchdog *it*
 # relaunches) inherit the handle, so one file collects the whole family's logs.
 function Start-Watchdog([string[]]$Arguments = @(), [string]$LogName = 'watchdog') {
@@ -517,22 +537,17 @@ try {
 
     # Click the pinned square. The bar logs its geometry at startup
     # ('pinned[0] chip at x,y WxH (bar-local)') precisely so this test never
-    # re-derives layout constants or DPI math.
-    # PowerShell marshals $null as String.Empty for string parameters, which
-    # would make FindWindowW match on an empty *title* too; [NullString]
-    # passes a real NULL so only the class is matched.
-    $barWnd = [WRTest.U32]::FindWindowW('WinRestyleTaskbar', [NullString]::Value)
+    # re-derives layout constants or DPI math. Retry across a possible
+    # display-change rebuild (Send-BarChipClick re-reads window + geometry each
+    # try); a double-launch on the rare retry is reaped below.
     $clicked = $false
-    $geom = [regex]::Match((Get-Log $wd.Log), 'pinned\[0\] chip at (\d+),(\d+) (\d+)x(\d+)')
-    if ($barWnd -ne [IntPtr]::Zero -and $geom.Success) {
-        $cx = [int]$geom.Groups[1].Value + [int]([int]$geom.Groups[3].Value / 2)
-        $cy = [int]$geom.Groups[2].Value + [int]([int]$geom.Groups[4].Value / 2)
-        $lparam = [IntPtr](($cy -shl 16) -bor $cx)
-        [WRTest.U32]::PostMessageW($barWnd, 0x0201, [IntPtr]::Zero, $lparam) | Out-Null
-        $clicked = Wait-Until { (Get-Log $wd.Log) -match 'pinned launch: ' } 15
+    foreach ($try in 1..3) {
+        if (-not (Send-BarChipClick $wd.Log 'pinned\[0\] chip at (\d+),(\d+) (\d+)x(\d+)')) {
+            Start-Sleep -Seconds 1; continue
+        }
+        if (Wait-Until { (Get-Log $wd.Log) -match 'pinned launch: ' } 8) { $clicked = $true; break }
     }
-    Record 'T15 clicking the pinned square launches the app' $clicked `
-        "barWnd=$barWnd geom=$($geom.Success)" -LogFile $wd.Log
+    Record 'T15 clicking the pinned square launches the app' $clicked '' -LogFile $wd.Log
     # Reap whatever the click started so it never outlives the suite.
     Get-Process $pinnedName -ErrorAction SilentlyContinue |
         Where-Object { $preLaunch -notcontains $_.Id } |
@@ -571,18 +586,23 @@ try {
     Remove-Item $ConfigFile -ErrorAction SilentlyContinue   # defaults: taskbar enabled
     $wd = Start-Watchdog -LogName 't17'
     $up = Wait-Until { (Get-Log $wd.Log) -match 'taskbar painted: color ' } 25
-    $barWnd = [WRTest.U32]::FindWindowW('WinRestyleTaskbar', [NullString]::Value)
+    # Retry across a possible display-change rebuild. The menu window, once
+    # created, is reused (hidden on close, never destroyed), so only re-click
+    # while it does not yet exist - that avoids a second click toggling a menu
+    # that try 1 already opened.
     $opened = $false
-    $geom = [regex]::Match((Get-Log $wd.Log), 'start chip at (\d+),(\d+) (\d+)x(\d+)')
-    if ($barWnd -ne [IntPtr]::Zero -and $geom.Success) {
-        $cx = [int]$geom.Groups[1].Value + [int]([int]$geom.Groups[3].Value / 2)
-        $cy = [int]$geom.Groups[2].Value + [int]([int]$geom.Groups[4].Value / 2)
-        $lparam = [IntPtr](($cy -shl 16) -bor $cx)
-        [WRTest.U32]::PostMessageW($barWnd, 0x0201, [IntPtr]::Zero, $lparam) | Out-Null
-        $opened = Wait-Until { (Get-Log $wd.Log) -match 'start menu opened: \d+ apps' } 15
+    foreach ($try in 1..3) {
+        if ([WRTest.U32]::FindWindowW('WinRestyleStartMenu', [NullString]::Value) -eq [IntPtr]::Zero) {
+            Send-BarChipClick $wd.Log 'start chip at (\d+),(\d+) (\d+)x(\d+)' | Out-Null
+        }
+        if (Wait-Until { (Get-Log $wd.Log) -match 'start menu opened: \d+ apps' } 8) { $opened = $true; break }
     }
     Record 'T17 clicking the Start chip opens the menu' ($up -and $opened) `
-        "painted=$up barWnd=$barWnd geom=$($geom.Success)" -LogFile $wd.Log
+        "painted=$up opened=$opened" -LogFile $wd.Log
+    # Built-in actions (ADR 0007 follow-up): the release binaries run from a
+    # target\ tree, so dev_mode is on and all four actions show.
+    $actionsShown = (Get-Log $wd.Log) -match 'start menu opened: \d+ apps, [1-9]\d* actions'
+    Record 'T17 built-in actions are listed' $actionsShown -LogFile $wd.Log
     $menuWnd = [WRTest.U32]::FindWindowW('WinRestyleStartMenu', [NullString]::Value)
     $closed = $false
     if ($menuWnd -ne [IntPtr]::Zero) {
@@ -615,7 +635,10 @@ try {
         -PassThru -RedirectStandardError $t18log
     $exited = Wait-Until { $proc.HasExited } 30
     if (-not $exited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
-    $activateOk = $exited -and ($proc.ExitCode -eq 0)
+    # `.ExitCode` is $null on a -PassThru process started without -Wait (which
+    # we can't use - it waits for the detached family). So exit is asserted via
+    # HasExited alone; correctness is the family/swapped/explorer checks below.
+    $activateOk = $exited
     $familyUp = Wait-Until {
         ((Get-Pids 'wr-watchdog').Count -eq 1) -and
         ((Get-Pids 'wr-shell').Count -eq 1) -and
@@ -636,7 +659,7 @@ try {
         -PassThru -RedirectStandardError $t18dlog
     $exited = Wait-Until { $proc.HasExited } 30
     if (-not $exited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
-    $deactivateOk = $exited -and ($proc.ExitCode -eq 0)
+    $deactivateOk = $exited   # see activate: ExitCode is $null without -Wait
     $explorerBack = Wait-Until { $null -ne (Get-Process explorer -ErrorAction SilentlyContinue) } 25
     $wrGone = Wait-Until {
         ((Get-Pids 'wr-watchdog').Count -eq 0) -and

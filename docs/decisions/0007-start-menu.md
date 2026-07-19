@@ -92,6 +92,30 @@ Windows code can only be *seen* at a manual T3.
   (`start menu launch: …\Computer Management.lnk`, the window got a taskbar
   button, the menu dismissed). Open/close logging matched the T17 signature.
 
+## Amendment (2026-07-19) — built-in actions
+
+The menu gained a small **actions** section above the scanned apps (`actions.rs`,
+pure + unit-tested like `apps.rs`): WinRestyle commands the user would otherwise
+need a terminal or the emergency hotkey for. `Win+Ctrl+F1` stays the *emergency*
+restore; these are the calm, discoverable equivalents.
+
+- **Restore Windows desktop** and **WinRestyle settings** — always shown.
+  Restore spawns `wr-installer deactivate` **detached** (`ShellExecuteW`), so it
+  runs outside the WinRestyle family and survives the taskbar's own teardown
+  when the sweep kills us (ADR 0008); settings spawns the manager window.
+- **Open terminal here** and **Run VM test suite** — **dev-gated**: shown only
+  when the running exe sits under a `target\` tree (`winlist::dev_mode`), never
+  in a shipped install. "Run tests" passes `-SkipBuild` (the running `.exe`s are
+  locked, so a swapped-session rebuild can't relink) and `-NoExit`; a literal
+  "Rebuild" action was dropped for the same lock reason — rebuild from the
+  terminal after a Restore.
+
+Actions and apps share one filtered/selected/scrolled list (actions first, then
+apps), so type-to-filter, arrows, and Enter treat them uniformly; the renderer
+marks action rows with a resting chip and a divider. Dispatch and process
+spawning live in `bar`/`winlist`; `actions.rs` stays pure. No config section
+was added (the dev gate is a path check, not a setting).
+
 ## Consequences
 
 The Start button's behavior changes (our menu instead of the Win-key tap) —

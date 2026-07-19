@@ -29,6 +29,8 @@
 //!   --exit-after=<secs>   exit cleanly after N seconds
 
 #[cfg_attr(not(windows), allow(dead_code))]
+mod actions;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod apps;
 #[cfg(windows)]
 mod bar;

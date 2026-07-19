@@ -59,6 +59,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use wr_core::config::{Backdrop, Config, ConfigStore};
 
+use crate::actions;
 use crate::apps;
 use crate::layout::{self, BarRect, Hit};
 use crate::render::{Frame, MenuFrame, MenuRow, Renderer, TrayItem};
@@ -114,13 +115,18 @@ struct StartMenu {
     size: (i32, i32),
     /// Geometry for the current filtered list + scroll.
     layout: startmenu::MenuLayout,
-    /// Filter text, selection, scroll.
+    /// Filter text, selection, scroll — over the *combined* list (actions
+    /// then apps), which is what `layout` and `state` count.
     state: startmenu::MenuState,
+    /// Built-in WinRestyle actions, shown above the apps (dev-gated at open).
+    actions: Vec<actions::MenuAction>,
     /// The scanned app list (re-scanned on every open).
     apps: Vec<apps::AppEntry>,
+    /// Indices into `actions` matching the filter.
+    filtered_actions: Vec<usize>,
     /// Indices into `apps` matching the filter.
-    filtered: Vec<usize>,
-    /// Filtered-list index under the mouse.
+    filtered_apps: Vec<usize>,
+    /// Combined-list index under the mouse (0..filtered_actions+filtered_apps).
     hovered: Option<usize>,
     /// Whether a `WM_MOUSELEAVE` request is currently armed.
     mouse_tracking: bool,
@@ -1312,8 +1318,10 @@ fn open_menu(bar_hwnd: HWND) {
     };
 
     // File I/O and window geometry, unborrowed.
+    let menu_actions = actions::actions(winlist::dev_mode());
     let apps = apps::scan(&apps::roots());
-    let count = apps.len();
+    let n_actions = menu_actions.len();
+    let count = n_actions + apps.len();
     let mut wr = RECT::default();
     if unsafe { GetWindowRect(bar_hwnd, &mut wr) }.is_err() {
         return;
@@ -1348,8 +1356,10 @@ fn open_menu(bar_hwnd: HWND) {
                     size: (rect.w, rect.h),
                     layout: startmenu::menu_layout(rect.w, rect.h, dpi, 0, 0),
                     state: startmenu::MenuState::default(),
+                    actions: Vec::new(),
                     apps: Vec::new(),
-                    filtered: Vec::new(),
+                    filtered_actions: Vec::new(),
+                    filtered_apps: Vec::new(),
                     hovered: None,
                     mouse_tracking: false,
                     visible: false,
@@ -1362,7 +1372,9 @@ fn open_menu(bar_hwnd: HWND) {
     let Some(hwnd) = STATE.with(move |s| {
         let mut s = s.borrow_mut();
         let m = s.as_mut()?.menu.as_mut()?;
-        m.filtered = (0..count).collect();
+        m.filtered_actions = (0..n_actions).collect();
+        m.filtered_apps = (0..apps.len()).collect();
+        m.actions = menu_actions;
         m.apps = apps;
         m.state = startmenu::MenuState::default();
         m.hovered = None;
@@ -1401,8 +1413,36 @@ fn open_menu(bar_hwnd: HWND) {
             log::warn!("start menu: foreground refused; keyboard filter unavailable");
         }
     }
-    log::info!("start menu opened: {count} apps");
+    log::info!(
+        "start menu opened: {} apps, {} actions",
+        count - n_actions,
+        n_actions
+    );
     redraw_menu();
+}
+
+/// Map a combined filtered-index (actions then apps) to what it points at.
+/// The single place the actions-before-apps ordering is decoded.
+enum MenuTarget {
+    Action(actions::ActionKind),
+    App(PathBuf),
+}
+
+fn menu_target(m: &StartMenu, combined: usize) -> Option<MenuTarget> {
+    let n = m.filtered_actions.len();
+    if combined < n {
+        let ai = *m.filtered_actions.get(combined)?;
+        Some(MenuTarget::Action(m.actions.get(ai)?.kind))
+    } else {
+        let ai = *m.filtered_apps.get(combined - n)?;
+        Some(MenuTarget::App(m.apps.get(ai)?.path.clone()))
+    }
+}
+
+/// Combined filtered-list length (actions + apps) — the count `layout` and
+/// `state` operate on.
+fn menu_len(m: &StartMenu) -> usize {
+    m.filtered_actions.len() + m.filtered_apps.len()
 }
 
 /// Hide the menu. Safe re-entrantly: the `visible` flag flips before the
@@ -1435,15 +1475,24 @@ fn redraw_menu() {
         if !m.visible {
             return;
         }
+        let n_act = m.filtered_actions.len();
         let rows: Vec<MenuRow> = m
             .layout
             .rows
             .iter()
-            .map(|(fidx, rect)| MenuRow {
-                rect: *rect,
-                name: m.apps[m.filtered[*fidx]].name.as_str(),
-                selected: *fidx == m.state.selected,
-                hovered: m.hovered == Some(*fidx),
+            .map(|(fidx, rect)| {
+                let (name, accent) = if *fidx < n_act {
+                    (m.actions[m.filtered_actions[*fidx]].label, true)
+                } else {
+                    (m.apps[m.filtered_apps[*fidx - n_act]].name.as_str(), false)
+                };
+                MenuRow {
+                    rect: *rect,
+                    name,
+                    selected: *fidx == m.state.selected,
+                    hovered: m.hovered == Some(*fidx),
+                    accent,
+                }
             })
             .collect();
         let frame = MenuFrame {
@@ -1453,7 +1502,7 @@ fn redraw_menu() {
             filter: &m.state.filter,
             rows: &rows,
             scrollbar: m.layout.scrollbar,
-            no_matches: m.filtered.is_empty() && !m.state.filter.is_empty(),
+            no_matches: n_act == 0 && m.filtered_apps.is_empty() && !m.state.filter.is_empty(),
         };
         match m.renderer.draw_menu(&frame) {
             Ok(()) => {}
@@ -1474,25 +1523,31 @@ fn redraw_menu() {
     });
 }
 
-/// Recompute the filtered list and layout after the filter changed.
+/// Recompute the filtered lists (actions + apps) and layout after the filter
+/// changed.
 fn refilter_menu(m: &mut StartMenu) {
-    m.filtered = apps::filter_indices(&m.apps, &m.state.filter);
+    m.filtered_actions = actions::filter_indices(&m.actions, &m.state.filter);
+    m.filtered_apps = apps::filter_indices(&m.apps, &m.state.filter);
     m.hovered = None;
-    m.layout = startmenu::menu_layout(m.size.0, m.size.1, m.dpi, m.filtered.len(), m.state.scroll);
+    m.layout = startmenu::menu_layout(m.size.0, m.size.1, m.dpi, menu_len(m), m.state.scroll);
 }
 
-/// Launch the app at filtered index `fidx` (`None` = current selection) and
-/// dismiss the menu. The launch pumps; the path is snapshotted first.
+/// Activate the combined-list entry at `fidx` (`None` = current selection):
+/// launch an app or run a built-in action, then dismiss the menu. Both the
+/// launch and the action pump, so the target is snapshotted under a short
+/// borrow, the borrow dropped, then acted on.
 fn launch_from_menu(fidx: Option<usize>) {
-    let path = STATE.with(|s| {
+    let target = STATE.with(|s| {
         let s = s.borrow();
         let m = s.as_ref()?.menu.as_ref()?;
-        let idx = *m.filtered.get(fidx.unwrap_or(m.state.selected))?;
-        Some(m.apps.get(idx)?.path.clone())
+        menu_target(m, fidx.unwrap_or(m.state.selected))
     });
-    if let Some(path) = path {
+    if let Some(target) = target {
         hide_menu();
-        winlist::launch_app(&path);
+        match target {
+            MenuTarget::App(path) => winlist::launch_app(&path),
+            MenuTarget::Action(kind) => winlist::run_menu_action(kind),
+        }
     }
 }
 
@@ -1519,13 +1574,12 @@ fn on_menu_key(wparam: WPARAM) {
             return false;
         };
         let before = m.state.clone();
-        m.state
-            .move_selection(delta, m.filtered.len(), m.layout.fit);
+        let count = menu_len(m);
+        m.state.move_selection(delta, count, m.layout.fit);
         if m.state == before {
             return false;
         }
-        m.layout =
-            startmenu::menu_layout(m.size.0, m.size.1, m.dpi, m.filtered.len(), m.state.scroll);
+        m.layout = startmenu::menu_layout(m.size.0, m.size.1, m.dpi, count, m.state.scroll);
         true
     });
     if changed {
@@ -1566,12 +1620,12 @@ fn on_menu_wheel(delta: i32) {
             return false;
         };
         let before = m.state.scroll;
-        m.state.on_wheel(rows, m.filtered.len(), m.layout.fit);
+        let count = menu_len(m);
+        m.state.on_wheel(rows, count, m.layout.fit);
         if m.state.scroll == before {
             return false;
         }
-        m.layout =
-            startmenu::menu_layout(m.size.0, m.size.1, m.dpi, m.filtered.len(), m.state.scroll);
+        m.layout = startmenu::menu_layout(m.size.0, m.size.1, m.dpi, count, m.state.scroll);
         // The row under the resting cursor changed; re-derived on next move.
         m.hovered = None;
         true

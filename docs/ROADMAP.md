@@ -169,6 +169,12 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       CLI `activate`/`deactivate`; manager asks "Activate now?" after apply.
       Automated **T18** swaps the session and puts it back. (2026-07-19;
       manager dialog flow rides the next T3.)
+- [x] Built-in **actions** section (ADR 0007 amendment): Restore Windows
+      desktop + WinRestyle settings (always), Open terminal + Run VM test suite
+      (dev-gated on a `target\` exe path). Restore spawns `wr-installer
+      deactivate` detached so it outlives the taskbar's own teardown. Actions
+      and apps share one filter/select/scroll list; `actions.rs` pure +
+      unit-tested. Automated T17 asserts they're listed. (2026-07-19.)
 - [ ] Row icons (needs an async loader — `SHGetFileInfoW` on shortcut targets
       can block; letter chips until then).
 - [ ] Open via the Win key (needs a keyboard hook).
