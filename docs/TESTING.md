@@ -61,7 +61,9 @@ Run the watchdog directly (it spawns `wr-shell` itself); no registry swap needed
 
 ## T3 — Emergency hotkey restores the desktop  ⭐ the critical test
 
-This is the real shell-swap test. **Snapshot first.**
+This is the real shell-swap test. **Snapshot first.** Last passed
+2026-07-19 (Phase 2 complete: bar + live tray registration on screen in the
+swapped session; hotkey restored the Windows desktop).
 
 1. `wr-installer apply`, then arrange for the watchdog to start at logon
    (Phase 0: launch it manually as the "shell" stand-in, or wire it as the

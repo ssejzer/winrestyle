@@ -141,3 +141,16 @@ Tray hosting shipped, with the hazard above resolved as follows.
    and disables hosting; nothing else changes. A malformed or hostile
    registration buffer parses to `None` and is dropped — the parser is
    length-checked everywhere and fuzz-shaped unit tests pin that.
+
+### Validation (2026-07-19)
+
+Automated suite **29/29** (T15 covers the extras config, a posted
+pinned-chip click, and the tray-host-off-while-unswapped safety gate).
+Manual T3 in a real swapped session: taskbar came up topmost with tray
+hosting active; after the `TaskbarCreated` broadcast a real application
+(OneDrive) registered its icon through the full wire sequence
+(`NIM_ADD` → `NIM_SETVERSION` → `NIM_MODIFY`) and the icon rendered on the
+bar; autostart ran the session's real entries; Start/window-button/clock+
+date all on screen; and `Win + Ctrl + F1` **restored the Windows desktop**
+— the reworked `desktop_shell_running()` did not block the explorer
+relaunch despite our own live `Shell_TrayWnd`.

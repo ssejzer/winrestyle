@@ -58,7 +58,15 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       half (actual startup apps + no re-run after a crash relaunch) gets
       verified at the next manual T3.
 
-## Phase 2 — Taskbar (flagship) ⭐ (current)
+## Phase 2 — Taskbar (flagship) ✅ (complete 2026-07-19)
+
+> Suite 29/29 + manual T3 pass 2026-07-19: real swapped logon, live tray
+> registration from a real app, and `Win+Ctrl+F1` restored the desktop.
+> Still outstanding within these items (tracked, not blocking): visual
+> checks that need specific setups — overflow menu and backdrop looks in a
+> swapped session, tray *click* forwarding against picky v4 apps, and
+> multi-monitor on real hardware. Deferred follow-ups: per-app grouping,
+> appbar channel + balloons, more widgets.
 
 - [x] Taskbar process skeleton (ADR 0005): spawned/supervised by the shell,
       `[taskbar]` config section (enabled/height/color/alpha/radius/margin)
@@ -114,7 +122,7 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       multi-monitor verification needs hardware and rides the T3
       checklist. (2026-07-19.)
 
-## Phase 3 — Installer / manager UI
+## Phase 3 — Installer / manager UI ⭐ (current)
 
 - [ ] Component registry + `Component` trait (`install`/`uninstall`/`apply`).
 - [ ] One-screen UI: component checklist + **Restyle Now** + uninstall.
