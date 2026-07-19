@@ -104,6 +104,9 @@ recovery for both is the emergency knowledge that `Ctrl+Shift+Esc` → run
 `explorer.exe` always works, and the next logon is unaffected (the registry
 is untouched on this path).
 
+Re-validated after the mitigations: full automated suite 24/24, including
+T7, on 2026-07-19.
+
 ## Verification
 
 Revised T5–T7 **all pass** (2026-07-18, Win11 22H2 build 22621, Hyper-V;

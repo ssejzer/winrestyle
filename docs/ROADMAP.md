@@ -25,7 +25,7 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       (ADR 0002). Revised T5–T7 ✅ (watchdog relaunch, no duplicate desktop,
       crash-loop → full self-restore; 2026-07-18).
 
-## Phase 1 — Minimal shell ✅ (complete 2026-07-19; T13 VM validation pending)
+## Phase 1 — Minimal shell ✅ (complete 2026-07-19)
 
 - [x] `wr-shell` paints desktop background / wallpaper (bottom-most
       virtual-screen window, config color + optional WIC image, repaint on
@@ -33,8 +33,8 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       visual half at the next manual T3).
 - [x] `wr-shell` spawns and supervises child surfaces (the taskbar) —
       shipped as the Phase 2 taskbar skeleton, ADR 0005 (relaunch, crash-loop
-      give-up, stray sweep on every recovery path). Automated T13 written;
-      first VM run pending.
+      give-up, stray sweep on every recovery path). Automated T13 green
+      2026-07-19.
 - [x] `wr-ipc` named-pipe protocol wired across watchdog ⇄ shell (installer
       client lands with the Phase 3 UI; `RequestRestore` is already served).
 - [x] `ShellHeartbeat` over `wr-ipc` — upgraded ADR 0002's process-handle
@@ -62,8 +62,8 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 
 - [x] Taskbar process skeleton (ADR 0005): spawned/supervised by the shell,
       `[taskbar]` config section (enabled/height/color/alpha/radius/margin)
-      with hot reload and opt-out; non-topmost when unswapped. (2026-07-19;
-      T13 VM run pending.)
+      with hot reload and opt-out; non-topmost when unswapped. (Automated
+      T13 green 2026-07-19.)
 - [x] Direct2D/DirectComposition rendering, first slice: premultiplied-alpha
       composition swapchain (WARP fallback for GPU-less VMs), rounded
       translucent themed bar, DPI-aware, DirectWrite clock. (2026-07-19.)
@@ -71,9 +71,14 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 - [x] Running-window enumeration → buttons; activate / minimize / restore.
       Event-driven (WinEvent hooks, no polling); stable button order;
       overflow drops the tail (grouping UI later); foreground chip
-      highlighted. Automated T14; interaction half verified at the next
-      manual T3. (2026-07-19.)
-- [ ] Button icons; hover states; overflow/grouping UI.
+      highlighted. Automated T14 green 2026-07-19; interaction half gets
+      verified at the next manual T3.
+- [x] Button icons + hover states. Icons via `WM_GETICON` (abort-if-hung
+      timeout) with class-icon fallback, decoded through GDI (legacy AND-mask
+      alpha handled), premultiplied, uploaded once and cached per window.
+      Hover via mouse-move hit-testing + `TrackMouseEvent` leave tracking.
+      (2026-07-19; visual check at the next manual T3.)
+- [ ] Overflow/grouping UI.
 - [ ] Widgets beyond the clock (shipped with the first slice); Start button
       (stub launch).
 - [ ] Pinned apps.

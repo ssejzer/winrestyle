@@ -5,6 +5,7 @@
 //! display changes — not per frame, keeping idle cost near zero.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use windows::core::PCWSTR;
@@ -14,12 +15,14 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
     GetSystemMetrics, LoadCursorW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
     SetTimer, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_TIMER,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    SWP_NOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+    WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+    WS_VISIBLE,
 };
 
 use wr_core::config::{Config, ConfigStore};
@@ -30,6 +33,10 @@ use crate::tasks::{self, TaskWindow};
 use crate::winlist;
 
 const CLOCK_TIMER: usize = 1;
+
+/// `windows-rs` files this under `UI_Controls`; not worth a whole feature
+/// for one well-known message id.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 struct State {
     store: Arc<ConfigStore>,
@@ -46,6 +53,13 @@ struct State {
     rects: Vec<layout::BarRect>,
     /// Foreground window handle (0 = none), for the highlighted chip.
     active: isize,
+    /// Decoded icons per window; `Some(None)` remembers "asked, has none"
+    /// so windows without icons aren't re-queried on every refresh.
+    icons: HashMap<isize, Option<tasks::Icon>>,
+    /// Index of the chip under the mouse.
+    hovered: Option<usize>,
+    /// Whether a `WM_MOUSELEAVE` request is currently armed.
+    mouse_tracking: bool,
     /// Id of the registered `CONFIG_CHANGED_MESSAGE` the shell posts to us.
     config_changed_msg: u32,
     /// Log the next successful draw (startup and config changes) so the VM
@@ -140,6 +154,9 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
             tasks: Vec::new(),
             rects: Vec::new(),
             active: 0,
+            icons: HashMap::new(),
+            hovered: None,
+            mouse_tracking: false,
             config_changed_msg,
             log_next_paint: true,
         })
@@ -202,6 +219,55 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             });
             if let Some(target) = target {
                 winlist::activate(target);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xffff) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+            let (hover_changed, arm) = STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                let Some(st) = s.as_mut() else {
+                    return (false, false);
+                };
+                let hovered = layout::hit_test(&st.rects, x, y);
+                let changed = hovered != st.hovered;
+                st.hovered = hovered;
+                let arm = !st.mouse_tracking;
+                st.mouse_tracking = true;
+                (changed, arm)
+            });
+            if arm {
+                // Ask for one WM_MOUSELEAVE so the hover highlight clears
+                // when the mouse leaves the bar.
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                if unsafe { TrackMouseEvent(&mut track) }.is_err() {
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow_mut().as_mut() {
+                            st.mouse_tracking = false; // retry on the next move
+                        }
+                    });
+                }
+            }
+            if hover_changed {
+                redraw(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            let had_hover = STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                let Some(st) = s.as_mut() else { return false };
+                st.mouse_tracking = false;
+                st.hovered.take().is_some()
+            });
+            if had_hover {
+                redraw(hwnd);
             }
             LRESULT(0)
         }
@@ -309,15 +375,17 @@ fn apply_layout(hwnd: HWND) {
 fn refresh_windows(hwnd: HWND) {
     let fresh = winlist::enumerate();
     let active = winlist::foreground();
-    let changed = STATE.with(|s| {
+    let (changed, added, removed) = STATE.with(|s| {
         let mut s = s.borrow_mut();
-        let Some(st) = s.as_mut() else { return false };
+        let Some(st) = s.as_mut() else {
+            return (false, Vec::new(), Vec::new());
+        };
         let (merged, added, removed) = tasks::merge(&st.tasks, &fresh);
-        for title in &added {
-            log::info!("taskbar: window added: {title:?}");
+        for w in &added {
+            log::info!("taskbar: window added: {:?}", w.title);
         }
-        for title in &removed {
-            log::info!("taskbar: window removed: {title:?}");
+        for w in &removed {
+            log::info!("taskbar: window removed: {:?}", w.title);
         }
         let list_changed = merged != st.tasks;
         if list_changed {
@@ -333,11 +401,42 @@ fn refresh_windows(hwnd: HWND) {
                 st.dpi,
             );
             st.tasks = merged;
+            // The chip under the cursor may have shifted; the highlight is
+            // re-derived on the next mouse move.
+            if st.hovered.is_some_and(|i| i >= st.rects.len()) {
+                st.hovered = None;
+            }
         }
         let active_changed = st.active != active;
         st.active = active;
-        list_changed || active_changed
+        (list_changed || active_changed, added, removed)
     });
+
+    // Icon fetching sends messages to other windows (WM_GETICON), and a
+    // blocked send pumps *incoming* sent messages through our wndproc — so
+    // it must happen with no STATE borrow held, or a re-entrant handler
+    // panics the RefCell.
+    if !added.is_empty() || !removed.is_empty() {
+        let fetched: Vec<(isize, Option<tasks::Icon>)> = added
+            .iter()
+            .map(|w| (w.hwnd, winlist::window_icon(w.hwnd)))
+            .collect();
+        STATE.with(|s| {
+            if let Some(st) = s.borrow_mut().as_mut() {
+                for w in &removed {
+                    st.icons.remove(&w.hwnd);
+                }
+                for (hwnd, icon) in fetched {
+                    log::debug!(
+                        "taskbar: icon for {hwnd:#x}: {}",
+                        icon.as_ref()
+                            .map_or("none".to_string(), |i| format!("{}x{}", i.width, i.height))
+                    );
+                    st.icons.insert(hwnd, icon);
+                }
+            }
+        });
+    }
     if changed {
         redraw(hwnd);
     }
@@ -355,6 +454,8 @@ fn redraw(hwnd: HWND) {
             tasks: &st.tasks,
             rects: &st.rects,
             active: st.active,
+            icons: &st.icons,
+            hovered: st.hovered,
         };
         match st.renderer.draw(&frame) {
             Ok(()) => {
@@ -383,6 +484,8 @@ fn redraw(hwnd: HWND) {
                             tasks: &st.tasks,
                             rects: &st.rects,
                             active: st.active,
+                            icons: &st.icons,
+                            hovered: st.hovered,
                         };
                         if let Err(e) = st.renderer.draw(&frame) {
                             log::error!("draw after renderer rebuild failed: {e}");

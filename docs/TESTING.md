@@ -239,8 +239,10 @@ real windows either way — unswapped it simply sits non-topmost).
    (event-driven — WinEvent hooks, no polling).
 3. Close it. ✅ Pass if `window removed: "WinRestyleT14"` appears.
 4. What the harness can't cover (verify at the manual T3 release pass):
-   buttons are *visible* on the bar with ellipsized titles; the foreground
-   window's chip is brighter and follows focus changes; clicking a button
+   buttons are *visible* on the bar with app icons and ellipsized titles
+   (windows without icons get text-only chips); the foreground window's chip
+   is brighter and follows focus changes; hovering a chip lightens it and
+   the highlight clears when the mouse leaves the bar; clicking a button
    focuses that window, clicking the focused window's button minimizes it,
    clicking a minimized window's button restores it.
 

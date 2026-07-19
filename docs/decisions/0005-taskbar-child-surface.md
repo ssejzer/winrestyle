@@ -82,6 +82,8 @@ refinement; translucency + rounded corners come from the alpha channel.
 
 ## Validation
 
-Automated T13 (spawn/paint, relaunch, crash-loop give-up, config opt-out).
-Visual half — bar on screen, and **no bar left after `Win+Ctrl+F1`** — at the
-next manual T3.
+Automated T13 (spawn/paint, relaunch, crash-loop give-up, config opt-out)
+**green 2026-07-19** (full suite 24/24), after one finding: the first run's
+T7 failure that led to the sweep→spawn window amendment in ADR 0002. Visual
+half — bar on screen, and **no bar left after `Win+Ctrl+F1`** — at the next
+manual T3.

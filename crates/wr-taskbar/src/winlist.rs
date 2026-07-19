@@ -10,17 +10,23 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
+};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowTextW,
-    IsIconic, IsWindowVisible, PostMessageW, SetForegroundWindow, ShowWindow, SwitchToThisWindow,
-    EVENT_OBJECT_CLOAKED, EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_OBJECT_NAMECHANGE,
-    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, GWL_EXSTYLE, GW_OWNER, OBJID_WINDOW, SW_MINIMIZE, SW_RESTORE,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    EnumWindows, GetClassLongPtrW, GetClassNameW, GetForegroundWindow, GetIconInfo, GetWindow,
+    GetWindowLongPtrW, GetWindowTextW, IsIconic, IsWindowVisible, PostMessageW,
+    SendMessageTimeoutW, SetForegroundWindow, ShowWindow, SwitchToThisWindow, EVENT_OBJECT_CLOAKED,
+    EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_UNCLOAKED,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GCLP_HICON,
+    GCLP_HICONSM, GWL_EXSTYLE, GW_OWNER, HICON, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2,
+    OBJID_WINDOW, SMTO_ABORTIFHUNG, SW_MINIMIZE, SW_RESTORE, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS, WM_APP, WM_GETICON, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
-use crate::tasks::{self, ClickAction, TaskWindow};
+use crate::tasks::{self, ClickAction, Icon, TaskWindow};
 
 /// Posted (coalesced) to the bar whenever the window population may have
 /// changed. The handler must call [`ack_refresh`] before re-enumerating.
@@ -175,6 +181,112 @@ unsafe extern "system" fn win_event_proc(
     if !REFRESH_PENDING.swap(true, Ordering::SeqCst) {
         let _ = PostMessageW(HWND(bar as _), WM_WINDOWS_CHANGED, WPARAM(0), LPARAM(0));
     }
+}
+
+/// Fetch a window's icon as renderable pixels. Asks the window first
+/// (`WM_GETICON`, with a short abort-if-hung timeout — a wedged app must
+/// never wedge the bar), then falls back to the window-class icon. `None`
+/// (no icon anywhere, or an undecodable one) renders as a text-only chip.
+pub fn window_icon(hwnd_raw: isize) -> Option<Icon> {
+    let hwnd = HWND(hwnd_raw as _);
+    unsafe {
+        let mut handle: usize = 0;
+        for kind in [ICON_SMALL2, ICON_SMALL, ICON_BIG] {
+            let mut result: usize = 0;
+            SendMessageTimeoutW(
+                hwnd,
+                WM_GETICON,
+                WPARAM(kind as usize),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG,
+                100,
+                Some(&mut result),
+            );
+            if result != 0 {
+                handle = result;
+                break;
+            }
+        }
+        if handle == 0 {
+            handle = GetClassLongPtrW(hwnd, GCLP_HICONSM);
+        }
+        if handle == 0 {
+            handle = GetClassLongPtrW(hwnd, GCLP_HICON);
+        }
+        if handle == 0 {
+            return None;
+        }
+        // Shared handle — ours to read, not to destroy.
+        icon_pixels(HICON(handle as _))
+    }
+}
+
+/// Decode an `HICON` into premultiplied BGRA via GDI.
+unsafe fn icon_pixels(hicon: HICON) -> Option<Icon> {
+    let mut info = ICONINFO::default();
+    GetIconInfo(hicon, &mut info).ok()?;
+    // GetIconInfo hands us *copies* of both planes; free them on every path.
+    let result = decode_icon_info(&info);
+    let _ = DeleteObject(info.hbmColor);
+    let _ = DeleteObject(info.hbmMask);
+    result
+}
+
+unsafe fn decode_icon_info(info: &ICONINFO) -> Option<Icon> {
+    if info.hbmColor.is_invalid() {
+        // Monochrome (mask-only) icon; not worth rendering.
+        return None;
+    }
+    let mut bm = BITMAP::default();
+    if GetObjectW(
+        info.hbmColor,
+        std::mem::size_of::<BITMAP>() as i32,
+        Some(&mut bm as *mut BITMAP as *mut core::ffi::c_void),
+    ) == 0
+    {
+        return None;
+    }
+    let (w, h) = (bm.bmWidth, bm.bmHeight);
+    if !(1..=256).contains(&w) || !(1..=256).contains(&h) {
+        return None;
+    }
+    let color = dib_bits(info.hbmColor, w, h)?;
+    // The AND-mask is only needed for alpha-less legacy icons; converting the
+    // 1bpp mask through GetDIBits to 32bpp gives white/black pixels.
+    let mask = dib_bits(info.hbmMask, w, h);
+    tasks::build_icon(w as u32, h as u32, color, mask.as_deref())
+}
+
+/// Read a bitmap's pixels as 32bpp top-down BGRA.
+unsafe fn dib_bits(bitmap: HBITMAP, w: i32, h: i32) -> Option<Vec<u8>> {
+    let hdc = CreateCompatibleDC(None);
+    if hdc.is_invalid() {
+        return None;
+    }
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h, // negative = top-down rows
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
+    let lines = GetDIBits(
+        hdc,
+        bitmap,
+        0,
+        h as u32,
+        Some(pixels.as_mut_ptr().cast()),
+        &mut bmi,
+        DIB_RGB_COLORS,
+    );
+    let _ = DeleteDC(hdc);
+    (lines == h).then_some(pixels)
 }
 
 /// Perform the taskbar click on a window (see [`tasks::click_action`]).

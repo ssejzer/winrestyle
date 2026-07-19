@@ -14,28 +14,88 @@ pub struct TaskWindow {
 /// position (with refreshed titles), closed windows drop out, new windows
 /// append at the end in enumeration order.
 ///
-/// Returns `(merged, added_titles, removed_titles)`; compare `merged` with
-/// the old list to know whether anything (including a title) changed.
+/// Returns `(merged, added, removed)`; compare `merged` with the old list to
+/// know whether anything (including a title) changed.
 pub fn merge(
     old: &[TaskWindow],
     fresh: &[TaskWindow],
-) -> (Vec<TaskWindow>, Vec<String>, Vec<String>) {
+) -> (Vec<TaskWindow>, Vec<TaskWindow>, Vec<TaskWindow>) {
     let mut merged = Vec::with_capacity(fresh.len());
     let mut removed = Vec::new();
     for w in old {
         match fresh.iter().find(|f| f.hwnd == w.hwnd) {
             Some(f) => merged.push(f.clone()),
-            None => removed.push(w.title.clone()),
+            None => removed.push(w.clone()),
         }
     }
     let mut added = Vec::new();
     for f in fresh {
         if !old.iter().any(|w| w.hwnd == f.hwnd) {
-            added.push(f.title.clone());
+            added.push(f.clone());
             merged.push(f.clone());
         }
     }
     (merged, added, removed)
+}
+
+/// A decoded window icon: premultiplied BGRA, top-down rows — exactly what
+/// the renderer uploads. Produced from raw GDI bits by [`build_icon`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Icon {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+/// Turn raw icon bits into a renderable [`Icon`].
+///
+/// `color` is the icon's 32bpp BGRA color plane. Icons drawn with a real
+/// alpha channel are used as-is; legacy icons carry alpha in a separate
+/// AND-mask instead (`mask`, also expanded to 32bpp: white = transparent,
+/// black = opaque). If the color plane has no alpha at all and no mask is
+/// available, the icon is treated as fully opaque. Output is premultiplied.
+pub fn build_icon(
+    width: u32,
+    height: u32,
+    mut color: Vec<u8>,
+    mask: Option<&[u8]>,
+) -> Option<Icon> {
+    let len = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    if len == 0 || color.len() != len {
+        return None;
+    }
+    let has_alpha = color.chunks_exact(4).any(|px| px[3] != 0);
+    if !has_alpha {
+        match mask {
+            Some(mask) if mask.len() == len => {
+                for (px, m) in color.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
+                    px[3] = if m[0] == 0 && m[1] == 0 && m[2] == 0 {
+                        255
+                    } else {
+                        0
+                    };
+                }
+            }
+            _ => {
+                for px in color.chunks_exact_mut(4) {
+                    px[3] = 255;
+                }
+            }
+        }
+    }
+    for px in color.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        px[0] = ((px[0] as u32 * a) / 255) as u8;
+        px[1] = ((px[1] as u32 * a) / 255) as u8;
+        px[2] = ((px[2] as u32 * a) / 255) as u8;
+    }
+    Some(Icon {
+        width,
+        height,
+        bgra: color,
+    })
 }
 
 /// What a click on a window's button does. The rules every taskbar follows:
@@ -76,7 +136,7 @@ mod tests {
         let fresh = [w(3, "c"), w(2, "b"), w(1, "a")];
         let (merged, added, removed) = merge(&old, &fresh);
         assert_eq!(merged, vec![w(1, "a"), w(2, "b"), w(3, "c")]);
-        assert_eq!(added, vec!["c"]);
+        assert_eq!(added, vec![w(3, "c")]);
         assert!(removed.is_empty());
     }
 
@@ -87,7 +147,7 @@ mod tests {
         let (merged, added, removed) = merge(&old, &fresh);
         assert_eq!(merged, vec![w(1, "a"), w(3, "c")]);
         assert!(added.is_empty());
-        assert_eq!(removed, vec!["b"]);
+        assert_eq!(removed, vec![w(2, "b")]);
     }
 
     #[test]
@@ -106,6 +166,39 @@ mod tests {
         let (merged, added, removed) = merge(&old, &old.to_vec());
         assert_eq!(merged, old.to_vec());
         assert!(added.is_empty() && removed.is_empty());
+    }
+
+    #[test]
+    fn icon_with_alpha_is_premultiplied() {
+        // One pixel: b=200 g=100 r=50, a=128 → channels scaled by 128/255.
+        let icon = build_icon(1, 1, vec![200, 100, 50, 128], None).unwrap();
+        assert_eq!(icon.bgra, vec![100, 50, 25, 128]);
+    }
+
+    #[test]
+    fn legacy_icon_gets_alpha_from_the_mask() {
+        // Two pixels, no alpha; mask says: first opaque (black), second
+        // transparent (white).
+        let color = vec![10, 20, 30, 0, 40, 50, 60, 0];
+        let mask = vec![0, 0, 0, 0, 255, 255, 255, 0];
+        let icon = build_icon(2, 1, color, Some(&mask)).unwrap();
+        assert_eq!(&icon.bgra[..4], &[10, 20, 30, 255]);
+        assert_eq!(&icon.bgra[4..], &[0, 0, 0, 0]); // premultiplied to nothing
+    }
+
+    #[test]
+    fn no_alpha_no_mask_means_opaque() {
+        let icon = build_icon(1, 1, vec![10, 20, 30, 0], None).unwrap();
+        assert_eq!(icon.bgra, vec![10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn bad_icon_dimensions_are_rejected() {
+        assert!(build_icon(2, 2, vec![0; 4], None).is_none()); // too short
+        assert!(build_icon(0, 0, Vec::new(), None).is_none());
+        // A mask of the wrong size is ignored, not fatal.
+        let icon = build_icon(1, 1, vec![1, 2, 3, 0], Some(&[0, 0])).unwrap();
+        assert_eq!(icon.bgra[3], 255);
     }
 
     #[test]
