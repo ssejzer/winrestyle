@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 ```
 
 It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
-T5–T13** against the real binaries (no shell swap, no re-logon needed) and
+T5–T14** against the real binaries (no shell swap, no re-logon needed) and
 prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
 Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
 
@@ -223,6 +223,26 @@ real taskbar during testing; in a swapped session it is topmost.
    translucent, clock on the right), and after `Win + Ctrl + F1` the restored
    explorer desktop has **no WinRestyle bar left on screen** (recovery paths
    sweep `wr-taskbar.exe`).
+
+## T14 — Taskbar buttons track running windows  (Phase 2)
+
+No registry swap needed; works unswapped (the bar enumerates the session's
+real windows either way — unswapped it simply sits non-topmost).
+
+1. Start the watchdog plain. ✅ Pass if shortly after `taskbar window up` the
+   log shows `taskbar windows: N` with one `window added: "…"` per
+   taskbar-worthy window on screen (alt-tab rules: visible, unowned,
+   non-tool, non-cloaked, titled).
+2. Open a new window with a distinctive title (the harness uses a
+   `WScript.Shell` popup titled `WinRestyleT14` — locale-independent).
+   ✅ Pass if `window added: "WinRestyleT14"` appears within a second or two
+   (event-driven — WinEvent hooks, no polling).
+3. Close it. ✅ Pass if `window removed: "WinRestyleT14"` appears.
+4. What the harness can't cover (verify at the manual T3 release pass):
+   buttons are *visible* on the bar with ellipsized titles; the foreground
+   window's chip is brighter and follows focus changes; clicking a button
+   focuses that window, clicking the focused window's button minimizes it,
+   clicking a minimized window's button restores it.
 
 ## Resolved Phase 0 question
 

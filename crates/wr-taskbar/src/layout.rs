@@ -29,6 +29,58 @@ pub fn bar_rect(screen_w: i32, screen_h: i32, height: u32, margin: u32, dpi: u32
     }
 }
 
+/// 96-DPI width reserved for the clock at the bar's right edge. Shared by
+/// the button layout (stops before it) and the renderer (draws into it).
+pub const CLOCK_RESERVE: u32 = 88;
+
+const BUTTON_MAX_W: u32 = 180;
+const BUTTON_MIN_W: u32 = 48;
+const BUTTON_GAP: u32 = 6;
+const BUTTON_VPAD: u32 = 6;
+const EDGE_PAD: u32 = 10;
+
+/// Bar-local rectangles for `count` window buttons: left-aligned after the
+/// edge padding, stopping before the clock reserve. Buttons shrink from
+/// `BUTTON_MAX_W` down to `BUTTON_MIN_W` as the bar fills; windows that
+/// still don't fit get no button (dropped from the end — grouping/overflow
+/// UI is a later slice).
+pub fn button_rects(bar_w: i32, bar_h: i32, count: usize, dpi: u32) -> Vec<BarRect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let pad = scale(EDGE_PAD, dpi);
+    let gap = scale(BUTTON_GAP, dpi);
+    let vpad = scale(BUTTON_VPAD, dpi);
+    let avail = bar_w - pad - scale(CLOCK_RESERVE, dpi);
+    let max_w = scale(BUTTON_MAX_W, dpi).max(1);
+    let min_w = scale(BUTTON_MIN_W, dpi).max(1);
+
+    let wanted = count as i32;
+    let width_if_all_fit = (avail - (wanted - 1) * gap) / wanted;
+    let (w, n) = if width_if_all_fit >= min_w {
+        (width_if_all_fit.min(max_w), wanted)
+    } else {
+        // Shrunk to the floor and still too many: drop the tail.
+        ((min_w), ((avail + gap) / (min_w + gap)).clamp(0, wanted))
+    };
+    let h = (bar_h - 2 * vpad).max(1);
+    (0..n)
+        .map(|i| BarRect {
+            x: pad + i * (w + gap),
+            y: vpad,
+            w,
+            h,
+        })
+        .collect()
+}
+
+/// Index of the rect containing the point, if any.
+pub fn hit_test(rects: &[BarRect], x: i32, y: i32) -> Option<usize> {
+    rects
+        .iter()
+        .position(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,6 +118,58 @@ mod tests {
     fn zero_margin_docks_edge_to_edge() {
         let r = bar_rect(1920, 1080, 48, 0, 96);
         assert_eq!((r.x, r.y, r.w, r.h), (0, 1080 - 48, 1920, 48));
+    }
+
+    #[test]
+    fn few_buttons_take_max_width() {
+        let rects = button_rects(1920, 48, 3, 96);
+        assert_eq!(rects.len(), 3);
+        assert!(rects.iter().all(|r| r.w == 180));
+        assert_eq!(rects[0].x, 10);
+        assert_eq!(rects[1].x, 10 + 180 + 6);
+        // Vertical padding leaves a slimmer chip inside the bar.
+        assert!(rects.iter().all(|r| r.y == 6 && r.h == 48 - 12));
+    }
+
+    #[test]
+    fn buttons_shrink_when_the_bar_fills() {
+        let rects = button_rects(1920, 48, 12, 96);
+        assert_eq!(rects.len(), 12);
+        assert!(rects[0].w < 180 && rects[0].w >= 48);
+        // The last button still ends before the clock reserve.
+        let last = rects.last().unwrap();
+        assert!(last.x + last.w <= 1920 - 88);
+    }
+
+    #[test]
+    fn overflow_drops_buttons_at_min_width() {
+        let rects = button_rects(800, 48, 50, 96);
+        assert!(!rects.is_empty());
+        assert!(rects.len() < 50);
+        assert!(rects.iter().all(|r| r.w == 48));
+        let last = rects.last().unwrap();
+        assert!(last.x + last.w <= 800 - 88);
+    }
+
+    #[test]
+    fn no_buttons_no_rects_and_tiny_bars_survive() {
+        assert!(button_rects(1920, 48, 0, 96).is_empty());
+        // A bar narrower than the clock reserve fits nothing but must not
+        // panic or return negative geometry.
+        for r in button_rects(60, 48, 4, 96) {
+            assert!(r.w >= 1 && r.h >= 1);
+        }
+    }
+
+    #[test]
+    fn hit_test_finds_the_right_button() {
+        let rects = button_rects(1920, 48, 3, 96);
+        assert_eq!(hit_test(&rects, rects[1].x + 1, rects[1].y + 1), Some(1));
+        // The gap between buttons belongs to nobody.
+        assert_eq!(hit_test(&rects, rects[1].x - 1, 20), None);
+        // The bar background outside any chip is a miss.
+        assert_eq!(hit_test(&rects, 1919, 20), None);
+        assert_eq!(hit_test(&[], 10, 10), None);
     }
 
     #[test]

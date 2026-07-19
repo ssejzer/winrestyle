@@ -18,14 +18,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
     GetSystemMetrics, LoadCursorW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
     SetTimer, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, MSG, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_TIMER, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+    SWP_NOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_TIMER,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 use wr_core::config::{Config, ConfigStore};
 
 use crate::layout;
-use crate::render::Renderer;
+use crate::render::{Frame, Renderer};
+use crate::tasks::{self, TaskWindow};
+use crate::winlist;
 
 const CLOCK_TIMER: usize = 1;
 
@@ -38,6 +40,12 @@ struct State {
     /// explorer's taskbar is live and we must not sit on top of it.
     topmost: bool,
     clock: String,
+    /// Taskbar-worthy windows in stable button order.
+    tasks: Vec<TaskWindow>,
+    /// Chip rectangle for `tasks[i]` (the tail may be dropped on overflow).
+    rects: Vec<layout::BarRect>,
+    /// Foreground window handle (0 = none), for the highlighted chip.
+    active: isize,
     /// Id of the registered `CONFIG_CHANGED_MESSAGE` the shell posts to us.
     config_changed_msg: u32,
     /// Log the next successful draw (startup and config changes) so the VM
@@ -129,6 +137,9 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
             dpi,
             topmost,
             clock: String::new(),
+            tasks: Vec::new(),
+            rects: Vec::new(),
+            active: 0,
             config_changed_msg,
             log_next_paint: true,
         })
@@ -145,6 +156,9 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
             "not topmost (another desktop shell is on screen)"
         }
     );
+    // Buttons: event-driven from here on; the initial refresh paints too.
+    winlist::install_hooks(hwnd);
+    refresh_windows(hwnd);
     redraw(hwnd);
     unsafe { SetTimer(hwnd, CLOCK_TIMER, 1000, None) };
 
@@ -170,6 +184,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         return LRESULT(0);
     }
     match msg {
+        winlist::WM_WINDOWS_CHANGED => {
+            // Re-arm first: events landing during the refresh must re-post.
+            winlist::ack_refresh();
+            refresh_windows(hwnd);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let x = (lparam.0 & 0xffff) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+            let target = STATE.with(|s| {
+                s.borrow().as_ref().and_then(|st| {
+                    layout::hit_test(&st.rects, x, y)
+                        .and_then(|i| st.tasks.get(i))
+                        .map(|t| t.hwnd)
+                })
+            });
+            if let Some(target) = target {
+                winlist::activate(target);
+            }
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == CLOCK_TIMER => {
             let stale = STATE.with(|s| {
                 s.borrow()
@@ -262,9 +297,50 @@ fn apply_layout(hwnd: HWND) {
             if let Err(e) = st.renderer.resize(rect.w, rect.h) {
                 log::error!("swapchain resize failed: {e}");
             }
+            st.rects = layout::button_rects(rect.w, rect.h, st.tasks.len(), st.dpi);
         }
     });
     redraw(hwnd);
+}
+
+/// Re-enumerate the window population, merge it into the button list, and
+/// repaint if anything the user can see changed. Triggered by the WinEvent
+/// hooks (coalesced), and once at startup.
+fn refresh_windows(hwnd: HWND) {
+    let fresh = winlist::enumerate();
+    let active = winlist::foreground();
+    let changed = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(st) = s.as_mut() else { return false };
+        let (merged, added, removed) = tasks::merge(&st.tasks, &fresh);
+        for title in &added {
+            log::info!("taskbar: window added: {title:?}");
+        }
+        for title in &removed {
+            log::info!("taskbar: window removed: {title:?}");
+        }
+        let list_changed = merged != st.tasks;
+        if list_changed {
+            if merged.len() != st.tasks.len() {
+                log::info!("taskbar windows: {}", merged.len());
+            }
+            let mut client = RECT::default();
+            let _ = unsafe { GetClientRect(hwnd, &mut client) };
+            st.rects = layout::button_rects(
+                client.right - client.left,
+                client.bottom - client.top,
+                merged.len(),
+                st.dpi,
+            );
+            st.tasks = merged;
+        }
+        let active_changed = st.active != active;
+        st.active = active;
+        list_changed || active_changed
+    });
+    if changed {
+        redraw(hwnd);
+    }
 }
 
 fn redraw(hwnd: HWND) {
@@ -272,7 +348,15 @@ fn redraw(hwnd: HWND) {
         let mut s = s.borrow_mut();
         let Some(st) = s.as_mut() else { return };
         st.clock = clock_string();
-        match st.renderer.draw(&st.config.taskbar, &st.clock, st.dpi) {
+        let frame = Frame {
+            bar: &st.config.taskbar,
+            clock: &st.clock,
+            dpi: st.dpi,
+            tasks: &st.tasks,
+            rects: &st.rects,
+            active: st.active,
+        };
+        match st.renderer.draw(&frame) {
             Ok(()) => {
                 if st.log_next_paint {
                     st.log_next_paint = false;
@@ -292,7 +376,15 @@ fn redraw(hwnd: HWND) {
                 match Renderer::new(hwnd, rect.right - rect.left, rect.bottom - rect.top) {
                     Ok(r) => {
                         st.renderer = r;
-                        if let Err(e) = st.renderer.draw(&st.config.taskbar, &st.clock, st.dpi) {
+                        let frame = Frame {
+                            bar: &st.config.taskbar,
+                            clock: &st.clock,
+                            dpi: st.dpi,
+                            tasks: &st.tasks,
+                            rects: &st.rects,
+                            active: st.active,
+                        };
+                        if let Err(e) = st.renderer.draw(&frame) {
                             log::error!("draw after renderer rebuild failed: {e}");
                         }
                     }

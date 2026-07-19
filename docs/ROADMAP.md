@@ -68,7 +68,12 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       composition swapchain (WARP fallback for GPU-less VMs), rounded
       translucent themed bar, DPI-aware, DirectWrite clock. (2026-07-19.)
 - [ ] Acrylic/blur backdrop; richer theming.
-- [ ] Running-window enumeration → buttons; activate / minimize / restore.
+- [x] Running-window enumeration → buttons; activate / minimize / restore.
+      Event-driven (WinEvent hooks, no polling); stable button order;
+      overflow drops the tail (grouping UI later); foreground chip
+      highlighted. Automated T14; interaction half verified at the next
+      manual T3. (2026-07-19.)
+- [ ] Button icons; hover states; overflow/grouping UI.
 - [ ] Widgets beyond the clock (shipped with the first slice); Start button
       (stub launch).
 - [ ] Pinned apps.

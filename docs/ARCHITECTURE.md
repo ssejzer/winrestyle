@@ -101,9 +101,11 @@ missing surface degrades the desktop; it is never a recovery trigger.
 
 Because surfaces are grandchildren that outlive a killed parent, **every
 recovery path sweeps them by name** (`wr_core::process::kill_all_named`):
-watchdog startup and `recover()`, shell startup and its clean-shutdown paths.
-An emergency restore must never leave a WinRestyle bar over the recovered
-explorer desktop.
+watchdog `recover()`, shell startup and its clean-shutdown paths. An
+emergency restore must never leave a WinRestyle bar over the recovered
+explorer desktop. (The watchdog's *startup* sweep covers only the shell —
+anything more widens the sweep→spawn single-process window; see the ADR 0002
+amendment of 2026-07-19. The fresh shell converges stray taskbars itself.)
 
 ### 2. Registry backup + rollback (`wr-core`)
 

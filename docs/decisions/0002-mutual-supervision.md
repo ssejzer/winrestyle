@@ -71,6 +71,39 @@ dies first, the monitor bumps the relaunch state and spawns the next one, up to
 the existing runaway cap. Waiting on the child handle also eliminates PID-reuse
 risk for every generation after the first.
 
+## Amendment: the sweep→spawn single-process window (found by automated T7, 2026-07-19)
+
+Between the startup stray-sweep killing the old shell and the supervisor
+spawning the fresh one, **the relaunched watchdog is the only WinRestyle
+process alive**. A kill landing in that window kills the whole family: no
+shell exists to relaunch anything, and T7's rapid-kill loop hit exactly that
+(watchdog logged its sweep and hotkey registration, died before
+`shell launched`; everything gone after 2 kills, no cap trip). The window had
+existed since Phase 0 — the Phase 2 change that also swept `wr-taskbar.exe`
+at startup added a second full process-snapshot inside it, widening it enough
+for the harness to land in it.
+
+Mitigations:
+
+1. The sweep moved from `run()` (main thread, before pipe/hotkey setup) into
+   `supervise_shell` immediately before the spawn loop — sweep→spawn are now
+   back-to-back on one thread, and the hotkey/pipe registration no longer sit
+   inside the window. Side effect: a stray shell may briefly connect to the
+   new pipe before being swept; the pipe server already survives client churn.
+2. The watchdog does **not** sweep stray taskbars at startup. The fresh shell
+   sweeps them itself before spawning its own (ADR 0005), and `recover()`
+   sweeps them on every restore path. Nothing that can run later may run
+   inside the window.
+3. T7 now waits for the pair to converge (fresh shell pid) between kills: the
+   test validates the runaway cap, and a kill inside the (few-ms) residual
+   window is a distinct, humanly unreproducible failure mode.
+
+The residual window — the tail of one process snapshot plus one
+`CreateProcess` — is accepted, like the simultaneous-death gap above: the
+recovery for both is the emergency knowledge that `Ctrl+Shift+Esc` → run
+`explorer.exe` always works, and the next logon is unaffected (the registry
+is untouched on this path).
+
 ## Verification
 
 Revised T5–T7 **all pass** (2026-07-18, Win11 22H2 build 22621, Hyper-V;

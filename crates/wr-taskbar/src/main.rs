@@ -24,6 +24,10 @@ mod bar;
 mod layout;
 #[cfg(windows)]
 mod render;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod tasks;
+#[cfg(windows)]
+mod winlist;
 
 #[cfg(not(windows))]
 fn main() {

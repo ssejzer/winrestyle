@@ -37,11 +37,17 @@ supervises child surfaces (the taskbar)".
    does not kill orphans. Without sweeps, an emergency restore would leave
    our bar floating over the recovered explorer desktop. Sweeps (shared
    helper `wr_core::process::kill_all_named`):
-   - watchdog startup stray-sweep (was shell-only; now shell + taskbar),
    - watchdog `recover()` (hotkey, crash-loop, IPC restore),
-   - shell startup (stray taskbar from a crashed previous shell),
+   - shell startup (stray taskbar from a crashed previous shell), before it
+     spawns its own,
    - shell clean-shutdown paths (IPC `Shutdown`, last-resort
      `restore_windows_and_exit`).
+
+   The watchdog's *startup* sweep deliberately covers only `wr-shell.exe`,
+   not the taskbar: extra work between sweeping the stray shell and spawning
+   the fresh one widens the single-process window that T7 caught on
+   2026-07-19 (see the ADR 0002 amendment). The fresh shell's own sweep
+   converges stray taskbars moments later.
 
 4. **Config flows by file + nudge, not by pipe.** The taskbar loads
    `config.toml` itself (`wr-core::config`, same never-fail rules). On

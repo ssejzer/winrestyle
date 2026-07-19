@@ -103,15 +103,6 @@ mod win {
         let shell_exe = shell_exe_path().context("locating wr-shell.exe")?;
         log::info!("watchdog starting; shell = {}", shell_exe.display());
 
-        // ADR 0002: if wr-shell just relaunched us after a crash, that shell —
-        // and possibly the crashed watchdog's other strays — are still running
-        // (Windows does not kill orphans). Spawning another shell would give
-        // the user two desktops — sweep first. The old shell's taskbar (our
-        // grandchild, ADR 0005) is equally stray: the fresh shell spawns its
-        // own.
-        wr_core::process::kill_all_named(wr_core::SHELL_EXE);
-        wr_core::process::kill_all_named(wr_core::TASKBAR_EXE);
-
         let guardian = Guardian {
             shutting_down: Arc::new(AtomicBool::new(false)),
             recovered: Arc::new(AtomicBool::new(false)),
@@ -164,6 +155,19 @@ mod win {
 
     /// Spawn + monitor the shell, relaunching on exit and bailing on crash-loop.
     fn supervise_shell(g: &Guardian, shell_exe: &PathBuf) {
+        // ADR 0002: if wr-shell just relaunched us after a crash, that shell —
+        // and possibly the crashed watchdog's other strays — are still running
+        // (Windows does not kill orphans); spawning another shell would give
+        // the user two desktops. Sweep here, immediately before the spawn
+        // loop: between "stray shell killed" and "fresh shell spawned" this
+        // watchdog is the only WinRestyle process alive, and a kill landing in
+        // that window strands the desktop — so the window must contain as
+        // little code as possible (T7 flake; ADR 0002 amendment, 2026-07-19).
+        // Stray taskbars are deliberately NOT swept here for the same reason:
+        // the fresh shell sweeps them itself before spawning its own
+        // (ADR 0005), and recover() sweeps them on the restore paths.
+        wr_core::process::kill_all_named(wr_core::SHELL_EXE);
+
         let mut crashes: Vec<Instant> = Vec::new();
 
         while !g.shutting_down.load(Ordering::SeqCst) {

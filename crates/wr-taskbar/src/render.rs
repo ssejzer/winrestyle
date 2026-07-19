@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::Direct3D::{
@@ -29,9 +29,11 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN,
@@ -45,7 +47,25 @@ use windows::Win32::Graphics::Dxgi::{
 
 use wr_core::config::Taskbar;
 
-use crate::layout;
+use crate::layout::{self, BarRect};
+use crate::tasks::TaskWindow;
+
+/// Everything one paint needs, so `draw` doesn't grow a parameter per slice.
+pub struct Frame<'a> {
+    pub bar: &'a Taskbar,
+    pub clock: &'a str,
+    pub dpi: u32,
+    pub tasks: &'a [TaskWindow],
+    /// Bar-local chip rectangles; `rects[i]` belongs to `tasks[i]` (the tail
+    /// of `tasks` may have no rect when the bar overflows).
+    pub rects: &'a [BarRect],
+    /// Raw handle of the foreground window (highlighted chip), 0 for none.
+    pub active: isize,
+}
+
+fn color(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r, g, b, a }
+}
 
 pub struct Renderer {
     swapchain: IDXGISwapChain1,
@@ -157,25 +177,21 @@ impl Renderer {
         self.bind_target()
     }
 
-    /// Draw the bar (rounded translucent fill + right-aligned clock) and
-    /// present. `D2DERR_RECREATE_TARGET` bubbles up so the caller can rebuild.
-    pub fn draw(&mut self, bar: &Taskbar, clock: &str, dpi: u32) -> windows::core::Result<()> {
+    /// Draw the bar — rounded translucent fill, window-button chips, and the
+    /// right-aligned clock — and present. `D2DERR_RECREATE_TARGET` bubbles up
+    /// so the caller can rebuild the renderer.
+    pub fn draw(&mut self, f: &Frame) -> windows::core::Result<()> {
         let size = unsafe { self.dc.GetSize() };
-        let fill = D2D1_COLOR_F {
-            r: bar.color.r as f32 / 255.0,
-            g: bar.color.g as f32 / 255.0,
-            b: bar.color.b as f32 / 255.0,
-            a: bar.alpha as f32 / 255.0,
-        };
-        let radius = layout::scale(bar.corner_radius, dpi) as f32;
+        let fill = color(
+            f.bar.color.r as f32 / 255.0,
+            f.bar.color.g as f32 / 255.0,
+            f.bar.color.b as f32 / 255.0,
+            f.bar.alpha as f32 / 255.0,
+        );
+        let radius = layout::scale(f.bar.corner_radius, f.dpi) as f32;
         unsafe {
             self.dc.BeginDraw();
-            self.dc.Clear(Some(&D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }));
+            self.dc.Clear(Some(&color(0.0, 0.0, 0.0, 0.0)));
             let brush = self.dc.CreateSolidColorBrush(&fill, None)?;
             self.dc.FillRoundedRectangle(
                 &D2D1_ROUNDED_RECT {
@@ -190,32 +206,63 @@ impl Renderer {
                 },
                 &brush,
             );
+            let text_brush = self
+                .dc
+                .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.92), None)?;
 
-            let format = self.dwrite.CreateTextFormat(
-                w!("Segoe UI"),
-                None,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                14.0 * dpi as f32 / 96.0,
-                w!("en-us"),
-            )?;
-            format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
-            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            let text_brush = self.dc.CreateSolidColorBrush(
-                &D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 0.92,
-                },
-                None,
-            )?;
-            let pad = layout::scale(16, dpi) as f32;
-            let text: Vec<u16> = clock.encode_utf16().collect();
+            // Window buttons: translucent white chips over the bar color,
+            // the foreground window a shade brighter. Theming comes later.
+            if !f.rects.is_empty() {
+                let chip = self
+                    .dc
+                    .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.08), None)?;
+                let chip_active = self
+                    .dc
+                    .CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 0.22), None)?;
+                let label = self.text_format(12.0, f.dpi, DWRITE_TEXT_ALIGNMENT_LEADING)?;
+                let chip_radius = layout::scale(6, f.dpi) as f32;
+                let pad = layout::scale(10, f.dpi) as f32;
+                for (task, r) in f.tasks.iter().zip(f.rects) {
+                    let rect = D2D_RECT_F {
+                        left: r.x as f32,
+                        top: r.y as f32,
+                        right: (r.x + r.w) as f32,
+                        bottom: (r.y + r.h) as f32,
+                    };
+                    self.dc.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect,
+                            radiusX: chip_radius,
+                            radiusY: chip_radius,
+                        },
+                        if task.hwnd == f.active {
+                            &chip_active
+                        } else {
+                            &chip
+                        },
+                    );
+                    let title: Vec<u16> = task.title.encode_utf16().collect();
+                    self.dc.DrawText(
+                        &title,
+                        &label,
+                        &D2D_RECT_F {
+                            left: rect.left + pad,
+                            right: rect.right - pad,
+                            ..rect
+                        },
+                        &text_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+
+            let clock_format = self.text_format(14.0, f.dpi, DWRITE_TEXT_ALIGNMENT_TRAILING)?;
+            let pad = layout::scale(16, f.dpi) as f32;
+            let text: Vec<u16> = f.clock.encode_utf16().collect();
             self.dc.DrawText(
                 &text,
-                &format,
+                &clock_format,
                 &D2D_RECT_F {
                     left: pad,
                     top: 0.0,
@@ -230,6 +277,38 @@ impl Renderer {
             self.swapchain.Present(1, DXGI_PRESENT(0)).ok()?;
         }
         Ok(())
+    }
+
+    /// A single-line, vertically centered text format with ellipsis trimming,
+    /// sized in 96-DPI points and scaled to the monitor.
+    fn text_format(
+        &self,
+        size_96: f32,
+        dpi: u32,
+        align: windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT,
+    ) -> windows::core::Result<IDWriteTextFormat> {
+        unsafe {
+            let format = self.dwrite.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size_96 * dpi as f32 / 96.0,
+                w!("en-us"),
+            )?;
+            format.SetTextAlignment(align)?;
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+            let trimming = DWRITE_TRIMMING {
+                granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                delimiter: 0,
+                delimiterCount: 0,
+            };
+            let ellipsis = self.dwrite.CreateEllipsisTrimmingSign(&format)?;
+            format.SetTrimming(&trimming, &ellipsis)?;
+            Ok(format)
+        }
     }
 }
 

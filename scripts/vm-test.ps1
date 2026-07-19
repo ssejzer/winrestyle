@@ -8,9 +8,9 @@
   crash-loop), T5/T6/T7 (watchdog kill / convergence / runaway cap),
   T8/T9 (hung shell / hung watchdog via the ADR 0003 heartbeat),
   T10/T11 (config load + hot reload over IPC; wallpaper paint + repaint),
-  T12 (logon autostart + config opt-out, ADR 0004), and T13 (taskbar surface
+  T12 (logon autostart + config opt-out, ADR 0004), T13 (taskbar surface
   supervision: spawn/paint, relaunch, crash-loop give-up, config opt-out,
-  ADR 0005).
+  ADR 0005), and T14 (window buttons track opened/closed windows).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
   desktop + Win+Ctrl+F1) and the logged-in halves of T4.
@@ -229,6 +229,7 @@ try {
         $pids = Get-Pids 'wr-watchdog'
         if ($pids.Count -eq 0) { break }
         $old = $pids[0]
+        $oldShell = @(Get-Pids 'wr-shell')[0]
         Stop-Process -Id $old -Force -ErrorAction SilentlyContinue
         $kills++
         if ($i -lt 4) {
@@ -239,6 +240,16 @@ try {
                 ($now.Count -ge 1) -and ($now[0] -ne $old)
             } 10
             if (-not $resurrected) { break }
+            # Also wait for the pair to converge (stray shell swept, FRESH
+            # shell spawned) before the next kill. A kill landing between
+            # sweep and spawn hits the single-process window (ADR 0002
+            # amendment) - a different failure mode than the runaway cap this
+            # test validates, and one no human can reproduce.
+            $converged = Wait-Until {
+                $s = Get-Pids 'wr-shell'
+                ($s.Count -eq 1) -and ($s[0] -ne $oldShell)
+            } 10
+            if (-not $converged) { break }
         }
     }
     # After the 4th kill the runaway cap must stop the cycle: no relaunch, and
@@ -392,6 +403,24 @@ try {
     $noTaskbar = (Get-Pids 'wr-taskbar').Count -eq 0
     Record 'T13 config opt-out never spawns the taskbar' ($skipped -and $noTaskbar) `
         "skipped=$skipped noTaskbar=$noTaskbar" -LogFile $wd.Log
+    Reset-TestEnv
+
+    # ---- T14: window buttons track open windows -----------------------------
+    # A WScript.Shell popup gives a top-level, unowned, titled dialog with a
+    # title we control - deterministic and locale-independent (notepad's
+    # title is localized; consoles may open in Windows Terminal).
+    Write-Section 'T14: taskbar window buttons track opened/closed windows'
+    Remove-Item $ConfigFile -ErrorAction SilentlyContinue   # defaults: taskbar enabled
+    $wd = Start-Watchdog -LogName 't14'
+    Wait-Until { (Get-Log $wd.Log) -match 'taskbar window up' } 25 | Out-Null
+    $popup = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList `
+        '-NoProfile', '-Command',
+        "(New-Object -ComObject WScript.Shell).Popup('WinRestyle T14', 90, 'WinRestyleT14') | Out-Null"
+    $added = Wait-Until { (Get-Log $wd.Log) -match 'window added: .*WinRestyleT14' } 25
+    Stop-Process -Id $popup.Id -Force -ErrorAction SilentlyContinue   # dialog dies with its process
+    $removed = Wait-Until { (Get-Log $wd.Log) -match 'window removed: .*WinRestyleT14' } 15
+    Record 'T14 new window becomes a taskbar button' $added -LogFile $wd.Log
+    Record 'T14 closed window drops its button' $removed -LogFile $wd.Log
     Reset-TestEnv
 }
 finally {
