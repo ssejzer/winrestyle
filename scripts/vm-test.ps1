@@ -12,10 +12,12 @@
   supervision: spawn/paint, relaunch, crash-loop give-up, config opt-out,
   ADR 0005), T14 (window buttons track opened/closed windows), and T15
   (taskbar extras: pinned apps incl. a real click-to-launch, backdrop +
-  date config, single-bar startup, tray host gated off while unswapped).
+  date config, single-bar startup, tray host gated off while unswapped),
+  and T16 (Phase 3 installer trial-run primitive: wr-shell --selftest).
 
   NOT covered — still manual, once per release: T3 (real swap + logon + blank
-  desktop + Win+Ctrl+F1) and the logged-in halves of T4.
+  desktop + Win+Ctrl+F1), the logged-in halves of T4, and the manager
+  *window* itself (T16 visual: checklist, startup list, Restyle Now / Undo).
 
   Run inside the disposable Windows 11 VM, from anywhere:
 
@@ -484,6 +486,23 @@ public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, Int
     Get-Process $pinnedName -ErrorAction SilentlyContinue |
         Where-Object { $preLaunch -notcontains $_.Id } |
         Stop-Process -Force -ErrorAction SilentlyContinue
+    Reset-TestEnv
+
+    # ---- T16: installer manager trial-run primitive (Phase 3) ---------------
+    # The manager *window* is manual (T3/T16 visual). Its safety-critical
+    # pre-swap primitive is automatable: the `wr-shell --selftest` trial run the
+    # installer performs before it ever touches the registry must load+validate
+    # the config, log 'selftest ok', and exit 0 - without spawning any surface
+    # or the safety harness. A non-zero exit is the installer's signal to abort
+    # the swap.
+    Write-Section 'T16: installer trial-run primitive (wr-shell --selftest)'
+    $Shell = Join-Path $Bin 'wr-shell.exe'
+    $selftestLog = Join-Path $LogDir 't16-selftest.log'
+    $proc = Start-Process -FilePath $Shell -ArgumentList '--selftest' -NoNewWindow `
+        -PassThru -Wait -RedirectStandardError $selftestLog
+    $selftestOk = ($proc.ExitCode -eq 0) -and ((Get-Log $selftestLog) -match 'selftest ok')
+    Record 'T16 shell --selftest validates config and exits 0' $selftestOk `
+        "exit=$($proc.ExitCode)" -LogFile $selftestLog
     Reset-TestEnv
 }
 finally {

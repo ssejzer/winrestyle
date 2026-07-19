@@ -45,6 +45,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION, SW_SHOWNORMAL};
 
+use wr_core::autostart::{entry_id, Source};
 use wr_core::config::ConfigStore;
 
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -186,10 +187,12 @@ fn enumerate() -> Vec<Entry> {
         );
     }
 
+    // Ids come from wr_core::autostart so the shell's launch filter and the
+    // Phase 3 manager's `disabled` checkboxes speak the exact same id format.
     for (name, command) in reg_values(HKEY_CURRENT_USER, RUNONCE_SUBKEY) {
         let delete_after = name.starts_with('!');
         entries.push(Entry {
-            id: format!("hkcu-runonce:{name}"),
+            id: entry_id(Source::HkcuRunOnce, &name),
             action: Action::RunOnce {
                 name: name.clone(),
                 command,
@@ -199,20 +202,20 @@ fn enumerate() -> Vec<Entry> {
     }
     for (name, command) in reg_values(HKEY_LOCAL_MACHINE, RUN_SUBKEY) {
         entries.push(Entry {
-            id: format!("hklm-run:{name}"),
+            id: entry_id(Source::HklmRun, &name),
             action: Action::CommandLine(command),
         });
     }
     for (name, command) in reg_values(HKEY_CURRENT_USER, RUN_SUBKEY) {
         entries.push(Entry {
-            id: format!("hkcu-run:{name}"),
+            id: entry_id(Source::HkcuRun, &name),
             action: Action::CommandLine(command),
         });
     }
 
-    for (scope, base) in [
-        ("startup-common", std::env::var_os("ProgramData")),
-        ("startup-user", std::env::var_os("APPDATA")),
+    for (source, base) in [
+        (Source::StartupCommon, std::env::var_os("ProgramData")),
+        (Source::StartupUser, std::env::var_os("APPDATA")),
     ] {
         let Some(base) = base else { continue };
         let dir = PathBuf::from(base).join(r"Microsoft\Windows\Start Menu\Programs\Startup");
@@ -226,7 +229,7 @@ fn enumerate() -> Vec<Entry> {
             }
             if item.file_type().is_ok_and(|t| t.is_file()) {
                 entries.push(Entry {
-                    id: format!("{scope}:{name}"),
+                    id: entry_id(source, &name),
                     action: Action::OpenPath(item.path()),
                 });
             }
@@ -235,7 +238,7 @@ fn enumerate() -> Vec<Entry> {
 
     if unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0 {
         entries.push(Entry {
-            id: "session:rdpclip".to_string(),
+            id: entry_id(Source::Session, "rdpclip"),
             action: Action::Rdpclip,
         });
     }

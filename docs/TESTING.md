@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File scripts\vm-test.ps1
 ```
 
 It pulls, builds release, runs the unit tests, then executes **T0, T1, T2,
-T5–T15** against the real binaries (no shell swap, no re-logon needed) and
+T5–T16** against the real binaries (no shell swap, no re-logon needed) and
 prints a PASS/FAIL summary. Per-test logs land in `target\vm-test-logs\`.
 Flags: `-SkipPull` (test local changes), `-SkipBuild`, `-SkipUnit`.
 
@@ -290,6 +290,43 @@ one pinned app) and start a fresh pair.
      monitor, correct position/DPI per monitor; unplugging/plugging a
      monitor rebuilds the bars (`rebuilding bars (display change)`);
      windows keep working (buttons on every bar list all windows).
+
+## T16 — Installer / manager UI  (Phase 3, ADR 0006)
+
+The manager's safety-critical logic is unit-tested cross-platform
+(`wr-core::{components,autostart,manager,config}`, `wr-installer::view`); the
+window itself is Direct2D and can only be *seen* in the VM. So T16 splits:
+
+**Automated (in the harness):**
+
+1. `wr-shell.exe --selftest` — the trial run the installer performs before it
+   ever touches the registry. ✅ Pass if it logs `selftest ok: config parsed
+   (…)` and exits `0`, without spawning the wallpaper/taskbar or the safety
+   harness. A non-zero exit is the installer's signal to abort the swap.
+
+**Manual, once per release (the window):** run `wr-installer` with no arguments.
+
+2. ✅ Pass if the manager window opens: a **Components** checklist (Taskbar,
+   Wallpaper, Startup programs) with the currently-enabled ones checked, and a
+   **Startup programs** list with one row per real logon entry (your HKCU/HKLM
+   `Run`, `RunOnce`, and Startup-folder items), each with a checkbox reflecting
+   whether it is on the config's `disabled` list. Toggling a checkbox
+   lightens/repaints its row; the list scrolls (mouse wheel) when it overflows;
+   the two footer buttons hover-highlight.
+3. **Restyle Now** (⚠️ **snapshot first** — this swaps the shell): ✅ pass if it
+   runs the trial, writes `%APPDATA%\WinRestyle\config.toml` reflecting the
+   checklist + startup opt-outs, backs up + sets `HKCU Shell`, and shows the
+   recovery-instructions dialog naming `Win + Ctrl + F1`. Then this collapses
+   into a normal **T3**: log out/in → WinRestyle desktop → hotkey restores it.
+4. **Undo / Restore**: ✅ pass if `HKCU Shell` returns to its original value
+   (or is removed), our surfaces are swept, and — if no desktop shell was on
+   screen — explorer comes back. Equivalent to `wr-installer restore` (T4) with
+   the process sweep added.
+5. Component semantics to eyeball: unchecking **Wallpaper** and re-applying
+   paints the neutral default background (no custom color/image); unchecking a
+   **Startup program** and re-applying makes the shell log
+   `autostart: skipped <id> (disabled in config)` at the next swapped logon
+   (ties back to T12).
 
 ## Resolved Phase 0 question
 

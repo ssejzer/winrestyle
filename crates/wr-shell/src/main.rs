@@ -51,6 +51,21 @@ fn main() {
         std::process::id()
     );
 
+    // Trial run (`--selftest`, used by the Phase 3 installer before it swaps
+    // the registry): prove this binary runs on this machine and the config
+    // parses, then exit 0 — without spawning any surfaces or the safety
+    // harness. A non-zero exit tells the installer NOT to touch the registry.
+    if opts.selftest {
+        let config = ConfigStore::load_default().get();
+        log::info!(
+            "selftest ok: config parsed (taskbar {}, wallpaper {}, autostart {})",
+            config.taskbar.enabled,
+            config.wallpaper.enabled,
+            config.autostart.enabled
+        );
+        return;
+    }
+
     // Config can never block startup: missing/broken files load as defaults.
     // The store is shared with the IPC thread, which swaps it on ReloadConfig;
     // consumers (the wallpaper, later autostart) read via `config.get()`.
@@ -375,6 +390,9 @@ struct Options {
     /// whose id contains this substring (see `autostart` module docs).
     #[cfg_attr(not(windows), allow(dead_code))]
     autostart_test_filter: Option<String>,
+    /// Load+validate config and exit 0 without spawning surfaces (the Phase 3
+    /// installer's pre-swap trial run).
+    selftest: bool,
 }
 
 impl Options {
@@ -389,6 +407,8 @@ impl Options {
                 opts.hang_heartbeat_after = v.parse().ok().map(Duration::from_secs);
             } else if let Some(v) = arg.strip_prefix("--autostart-test-filter=") {
                 opts.autostart_test_filter = (!v.is_empty()).then(|| v.to_string());
+            } else if arg == "--selftest" {
+                opts.selftest = true;
             }
         }
         opts

@@ -1,84 +1,58 @@
-//! WinRestyle installer / manager — the one-screen UX.
+//! WinRestyle installer / manager — the one-screen UX (Phase 3).
 //!
-//! Planned for **Phase 3**: a component checklist + **Restyle Now** / uninstall
-//! button. Apply does: trial-run the shell → back up the registry → swap →
-//! show recovery instructions.
+//! Run with no arguments it opens the **manager window**: a Direct2D-rendered
+//! (consistent with the taskbar) checklist of components (taskbar, wallpaper,
+//! startup-programs management), a per-entry list of the logon-autostart
+//! programs the shell would run, and two actions — **Restyle Now** (safe apply:
+//! preflight → write config → trial run → back up + swap; `wr-core::manager`)
+//! and **Undo / Restore**. The safety-critical logic all lives in cross-platform
+//! `wr-core` modules (`components`, `autostart`, `manager`, `config`) and is
+//! unit-tested; this crate is the thin, Windows-only presentation layer, so the
+//! window itself is verified in the VM (manual T3 / T16).
 //!
-//! ## Phase 0 status: a tiny CLI for testing the safety harness by hand.
+//! The headless subcommands remain for the automated harness and hand-driving:
 //!
-//! This lets us exercise `wr-core::shell` without a UI yet:
-//!
-//!   wr-installer status     show the current/backed-up shell state
-//!   wr-installer apply       back up + set HKCU Shell to wr-shell.exe (DANGER: VM only)
-//!   wr-installer restore     restore the original shell
+//!   wr-installer              open the manager window (default)
+//!   wr-installer status       show the current/backed-up shell state
+//!   wr-installer apply        back up + set HKCU Shell (DANGER: VM only)
+//!   wr-installer restore      restore the original shell
 
-use anyhow::{bail, Result};
+use anyhow::Result;
+
+mod cli;
+// Pure geometry/hit-testing; compiled (and unit-tested) on every host, used by
+// the Windows-only render/app modules.
+#[cfg(windows)]
+mod app;
+#[cfg(windows)]
+mod render;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod view;
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let cmd = std::env::args().nth(1).unwrap_or_else(|| "status".into());
-    match cmd.as_str() {
-        "status" => status(),
-        "apply" => apply(),
-        "restore" => restore(),
-        other => {
-            bail!("unknown command {other:?}; use: status | apply | restore");
+    let cmd = std::env::args().nth(1);
+    match cmd.as_deref() {
+        None => gui(),
+        Some("status") => cli::status(),
+        Some("apply") => cli::apply(),
+        Some("restore") => cli::restore(),
+        Some("gui") => gui(),
+        Some("--help" | "-h" | "help") => cli::usage(),
+        Some(other) => {
+            eprintln!("unknown command {other:?}");
+            cli::usage();
         }
     }
 }
 
 #[cfg(windows)]
-fn status() -> Result<()> {
-    let current = wr_core::shell::read_user_shell()?;
-    let backed_up = wr_core::shell::has_backup()?;
-    println!("HKCU Shell (current): {current:?}");
-    println!("WinRestyle backup present: {backed_up}");
-    Ok(())
-}
-
-#[cfg(windows)]
-fn apply() -> Result<()> {
-    use anyhow::Context;
-    // The registry `Shell` value must point at the *watchdog*, not `wr-shell`
-    // directly: the watchdog owns the `Win + Ctrl + F1` emergency hotkey and
-    // supervises `wr-shell` as its child. Pointing `Shell` at `wr-shell.exe`
-    // would log the user into a blank desktop with no hotkey and no supervisor
-    // running — exactly the brick the safety harness exists to prevent.
-    let shell = std::env::current_exe()?
-        .parent()
-        .context("installer has no parent dir")?
-        .join("wr-watchdog.exe");
-    println!("WARNING: this replaces your per-user shell. Run in a VM only.");
-    wr_core::shell::backup_and_set_shell(&shell.to_string_lossy())?;
-    println!("applied. Log out/in (or reboot) to start the WinRestyle shell.");
-    println!(
-        "emergency restore hotkey: {}",
-        wr_core::EMERGENCY_HOTKEY_LABEL
-    );
-    Ok(())
-}
-
-#[cfg(windows)]
-fn restore() -> Result<()> {
-    let outcome = wr_core::shell::restore_shell()?;
-    println!("restore outcome: {outcome:?}");
-    Ok(())
+fn gui() -> Result<()> {
+    app::run()
 }
 
 #[cfg(not(windows))]
-fn status() -> Result<()> {
-    not_windows()
-}
-#[cfg(not(windows))]
-fn apply() -> Result<()> {
-    not_windows()
-}
-#[cfg(not(windows))]
-fn restore() -> Result<()> {
-    not_windows()
-}
-#[cfg(not(windows))]
-fn not_windows() -> Result<()> {
-    bail!("WinRestyle only runs on Windows 11");
+fn gui() -> Result<()> {
+    anyhow::bail!("WinRestyle only runs on Windows 11");
 }

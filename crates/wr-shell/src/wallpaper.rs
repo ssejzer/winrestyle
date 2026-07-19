@@ -197,7 +197,9 @@ fn paint(hwnd: HWND) {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         let Some(state) = s.as_mut() else { return };
-        let color = state.config.wallpaper.color;
+        // `effective_*` fold in the wallpaper master switch: styling off paints
+        // the neutral default and ignores the image (wr-core::config).
+        let color = state.config.wallpaper.effective_color();
         unsafe {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -267,7 +269,10 @@ fn refresh_config(hwnd: HWND) {
         if new == state.config {
             return;
         }
-        if new.wallpaper.image != state.config.wallpaper.image {
+        // Reload on any change to what actually renders — including the master
+        // switch flipping, which changes the effective image without touching
+        // the raw `image` field.
+        if new.wallpaper.effective_image() != state.config.wallpaper.effective_image() {
             state.image = load_image(&new);
         }
         state.config = new;
@@ -300,7 +305,7 @@ fn fit_to_screen(hwnd: HWND) {
 /// Decode the configured image, if any. A missing or broken image is a logged
 /// warning and a `None` — the solid color shows instead (never fatal).
 fn load_image(config: &Config) -> Option<Image> {
-    let path = config.wallpaper.image.as_ref()?;
+    let path = config.wallpaper.effective_image()?;
     match decode(path) {
         Ok(img) => {
             log::info!(

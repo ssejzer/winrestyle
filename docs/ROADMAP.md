@@ -122,14 +122,29 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       multi-monitor verification needs hardware and rides the T3
       checklist. (2026-07-19.)
 
-## Phase 3 — Installer / manager UI ⭐ (current)
+## Phase 3 — Installer / manager UI ⭐ (code complete 2026-07-19; window rides next T3)
 
-- [ ] Component registry + `Component` trait (`install`/`uninstall`/`apply`).
-- [ ] One-screen UI: component checklist + **Restyle Now** + uninstall.
-- [ ] **Startup-programs manager UI** — surface the Phase 1 logon-autostart
-      entries as a per-entry on/off list, so the opt-in/out has a real UX.
-- [ ] Safe apply: trial run → registry backup → swap; recovery instructions.
-- [ ] **This is where the target UX ships.**
+> Logic in cross-platform, unit-tested `wr-core` (`components`, `autostart`,
+> `manager`, `config` write + `Wallpaper.enabled`); a thin Direct2D
+> `wr-installer` window over it (`view.rs` pure + unit-tested like the taskbar's
+> `layout.rs`). Suite green on host + type-checked on the Windows target;
+> clippy/fmt clean. Automated **T16** covers the `--selftest` trial-run
+> primitive. The manager *window* — checklist, startup list, Restyle Now, Undo —
+> is visual and rides the next manual T3. No watchdog/IPC changes (ADR 0006).
+
+- [x] Component registry + `Component` trait (`install`/`uninstall`; the
+      registry's `apply(base, selected)` is the plural "apply"). Taskbar,
+      Wallpaper, and Startup-programs components. (`wr-core::components`.)
+- [x] One-screen UI: component checklist + **Restyle Now** + **Undo / Restore**,
+      Direct2D-rendered (opaque `ID2D1HwndRenderTarget`), scrollable, DPI-aware.
+      (`wr-installer` `view`/`render`/`app`; the CLI stays for T0/T4.)
+- [x] **Startup-programs manager UI** — the Phase 1 logon-autostart entries as a
+      per-entry on/off list, writing `[autostart].disabled`. Ids are shared with
+      the shell's launch filter (`wr-core::autostart`) so they cannot drift.
+- [x] Safe apply: preflight → write config → trial run (`wr-shell --selftest`) →
+      registry backup + swap → recovery instructions. (`wr-core::manager`;
+      teardown reuses the proven restore + sweep + conditional-explorer path.)
+- [x] **This is where the target UX ships.** (Window visuals verify at T3.)
 
 ## Phase 4+ — Beyond
 

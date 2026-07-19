@@ -34,6 +34,13 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Wallpaper {
+    /// Master switch for WinRestyle wallpaper styling. `false` makes the shell
+    /// paint the neutral default color and ignore any configured image — a way
+    /// to say "don't restyle the desktop background" without leaving the
+    /// (explorer-less) desktop black. Surfaced as the "Wallpaper" component in
+    /// the Phase 3 manager. Defaults to `true` so existing configs are
+    /// unaffected.
+    pub enabled: bool,
     /// Solid fill color, `"#rrggbb"`.
     pub color: Color,
     /// Optional image; when set it wins over `color` (which still shows while
@@ -44,12 +51,36 @@ pub struct Wallpaper {
 impl Default for Wallpaper {
     fn default() -> Self {
         Wallpaper {
+            enabled: true,
             color: Color {
                 r: 0x1a,
                 g: 0x1a,
                 b: 0x2e,
             },
             image: None,
+        }
+    }
+}
+
+impl Wallpaper {
+    /// The color the shell should actually paint: the configured color when
+    /// styling is on, the neutral default when off. Centralized so the shell's
+    /// paint path and the manager's preview never disagree about what "off"
+    /// looks like.
+    pub fn effective_color(&self) -> Color {
+        if self.enabled {
+            self.color
+        } else {
+            Wallpaper::default().color
+        }
+    }
+
+    /// The image the shell should actually load: none when styling is off.
+    pub fn effective_image(&self) -> Option<&PathBuf> {
+        if self.enabled {
+            self.image.as_ref()
+        } else {
+            None
         }
     }
 }
@@ -78,9 +109,27 @@ impl Default for Autostart {
 }
 
 impl Autostart {
-    /// Should this entry launch? Case-insensitive on the id.
+    /// Should this entry launch? Case-insensitive on the id. Factors in both
+    /// the master switch and the per-entry `disabled` list.
     pub fn allows(&self, id: &str) -> bool {
         self.enabled && !self.disabled.iter().any(|d| d.eq_ignore_ascii_case(id))
+    }
+
+    /// Whether this specific entry is on the `disabled` list, *independent* of
+    /// the master switch. The manager drives a per-entry checkbox off this, so
+    /// toggling one entry never depends on whether autostart as a whole is on.
+    pub fn is_disabled(&self, id: &str) -> bool {
+        self.disabled.iter().any(|d| d.eq_ignore_ascii_case(id))
+    }
+
+    /// Add or remove `id` from the `disabled` list. Idempotent; keeps the list
+    /// free of case-insensitive duplicates so a round-trip through the manager
+    /// never accretes entries. Used by the Phase 3 startup-programs manager.
+    pub fn set_disabled(&mut self, id: &str, disabled: bool) {
+        self.disabled.retain(|d| !d.eq_ignore_ascii_case(id));
+        if disabled {
+            self.disabled.push(id.to_string());
+        }
     }
 }
 
@@ -224,6 +273,35 @@ fn read(path: &Path) -> anyhow::Result<Option<Config>> {
     Ok(Some(config))
 }
 
+/// Serialize a config to a TOML document. Round-trips with [`read`]/parsing:
+/// what this writes, the shell loads back to an equal [`Config`].
+pub fn to_toml_string(config: &Config) -> anyhow::Result<String> {
+    toml::to_string_pretty(config).map_err(|e| anyhow::anyhow!("serializing config: {e}"))
+}
+
+/// Write `config` to `path`, creating parent directories. Atomic: the document
+/// is written to a sibling temp file and renamed over `path`, so a crash
+/// mid-write never leaves the shell a half-written (and therefore ignored,
+/// per the load rules) config. The manager UI persists edits through here.
+pub fn write(path: &Path, config: &Config) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let text = to_toml_string(config)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating config dir {}", dir.display()))?;
+    }
+    // Same-directory temp so the rename stays on one volume (atomic). The pid
+    // keeps concurrent writers from colliding on the temp name.
+    let tmp = path.with_extension(format!("toml.tmp{}", std::process::id()));
+    std::fs::write(&tmp, text.as_bytes()).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("replacing {}", path.display())
+    })?;
+    log::info!("config written to {}", path.display());
+    Ok(())
+}
+
 /// The current config plus where it came from. Shared (e.g. `Arc<ConfigStore>`)
 /// between whatever consumes settings and the IPC thread that reloads them.
 pub struct ConfigStore {
@@ -347,6 +425,29 @@ mod tests {
     fn autostart_master_switch_blocks_everything() {
         let config: Config = toml::from_str("[autostart]\nenabled = false\n").unwrap();
         assert!(!config.autostart.allows("hkcu-run:anything"));
+    }
+
+    #[test]
+    fn per_entry_disable_toggle_is_idempotent_and_case_insensitive() {
+        let mut a = Autostart::default();
+        assert!(!a.is_disabled("hkcu-run:App"));
+
+        a.set_disabled("hkcu-run:App", true);
+        assert!(a.is_disabled("hkcu-run:app")); // case-insensitive
+        assert!(!a.allows("hkcu-run:App"));
+
+        // Re-disabling with different case must not duplicate.
+        a.set_disabled("HKCU-RUN:APP", true);
+        assert_eq!(a.disabled.len(), 1);
+
+        // Independent of the master switch: the entry stays "disabled" even
+        // when autostart as a whole is off.
+        a.enabled = false;
+        assert!(a.is_disabled("hkcu-run:App"));
+
+        a.set_disabled("hkcu-run:App", false);
+        assert!(!a.is_disabled("hkcu-run:App"));
+        assert!(a.disabled.is_empty());
     }
 
     #[test]
@@ -489,6 +590,71 @@ mod tests {
         // Removed file: back to defaults.
         std::fs::remove_file(&path).unwrap();
         assert_eq!(store.reload(), Config::default());
+    }
+
+    #[test]
+    fn wallpaper_enabled_defaults_true() {
+        let wp = toml::from_str::<Config>("").unwrap().wallpaper;
+        assert!(wp.enabled);
+        // An explicit opt-out parses and old configs (no key) default to on.
+        let off: Config = toml::from_str("[wallpaper]\nenabled = false\n").unwrap();
+        assert!(!off.wallpaper.enabled);
+    }
+
+    #[test]
+    fn wallpaper_effective_values_respect_the_switch() {
+        let custom = Color { r: 1, g: 2, b: 3 };
+        let img = PathBuf::from(r"C:\bg.jpg");
+        let on = Wallpaper {
+            enabled: true,
+            color: custom,
+            image: Some(img.clone()),
+        };
+        assert_eq!(on.effective_color(), custom);
+        assert_eq!(on.effective_image(), Some(&img));
+
+        let off = Wallpaper {
+            enabled: false,
+            ..on
+        };
+        assert_eq!(off.effective_color(), Wallpaper::default().color);
+        assert_eq!(off.effective_image(), None);
+    }
+
+    #[test]
+    fn config_round_trips_through_toml() {
+        // A config exercising every section, including the fiddly bits: an
+        // image path, a disabled list, pinned apps, a non-default backdrop.
+        let mut config = Config::default();
+        config.wallpaper.enabled = false;
+        config.wallpaper.color = "#abcdef".parse().unwrap();
+        config.wallpaper.image = Some(PathBuf::from(r"C:\Users\me\bg.png"));
+        config.autostart.enabled = true;
+        config.autostart.disabled = vec!["hkcu-run:OneDrive".into(), "startup-user:x.lnk".into()];
+        config.taskbar.backdrop = Backdrop::Mica;
+        config.taskbar.pinned = vec![PathBuf::from(r"C:\Windows\notepad.exe")];
+        config.taskbar.show_date = false;
+
+        let text = to_toml_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, config, "round-trip changed the config:\n{text}");
+    }
+
+    #[test]
+    fn write_is_atomic_and_reloadable() {
+        let path = scratch("write");
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::default();
+        config.taskbar.color = "#0a0b0c".parse().unwrap();
+        write(&path, &config).unwrap();
+        // No temp file left behind, and the store loads exactly what we wrote.
+        assert_eq!(ConfigStore::load(Some(path.clone())).get(), config);
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
     }
 
     #[test]
