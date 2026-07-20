@@ -155,27 +155,55 @@ impl MenuState {
         changed
     }
 
-    /// Move the selection by `delta` rows (arrow keys), clamped, scrolling
-    /// just enough to keep it visible in a `fit`-row viewport.
-    pub fn move_selection(&mut self, delta: i32, count: usize, fit: usize) {
-        if count == 0 {
-            self.selected = 0;
-            self.scroll = 0;
-            return;
-        }
-        self.selected = (self.selected as i64 + delta as i64).clamp(0, count as i64 - 1) as usize;
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if fit > 0 && self.selected >= self.scroll + fit {
-            self.scroll = self.selected + 1 - fit;
-        }
-    }
-
     /// Scroll the viewport by `rows` (wheel), clamped; the selection stays.
     pub fn on_wheel(&mut self, rows: i32, count: usize, fit: usize) {
         let max = count.saturating_sub(fit) as i64;
         self.scroll = (self.scroll as i64 + rows as i64).clamp(0, max) as usize;
     }
+
+    /// Move the selection one step in `delta`'s direction to the next
+    /// *selectable* row (skipping group headers, marked `false` in
+    /// `selectable`), then scroll just enough to keep it visible in a
+    /// `fit`-row viewport. A no-op if there is nothing selectable that way.
+    pub fn move_selection_skipping(&mut self, delta: i32, selectable: &[bool], fit: usize) {
+        let count = selectable.len();
+        if count == 0 {
+            self.selected = 0;
+            self.scroll = 0;
+            return;
+        }
+        let step: i64 = if delta >= 0 { 1 } else { -1 };
+        let mut idx = (self.selected.min(count - 1)) as i64;
+        loop {
+            let next = idx + step;
+            if next < 0 || next >= count as i64 {
+                break; // clamped at an end; stay put
+            }
+            idx = next;
+            if selectable[idx as usize] {
+                self.selected = idx as usize;
+                break;
+            }
+        }
+        // Keep the selection (and the header just above it, when there is one)
+        // visible.
+        if self.selected < self.scroll {
+            // Show the preceding header too if the selection tops the viewport.
+            let top = if self.selected > 0 && !selectable[self.selected - 1] {
+                self.selected - 1
+            } else {
+                self.selected
+            };
+            self.scroll = top;
+        } else if fit > 0 && self.selected >= self.scroll + fit {
+            self.scroll = self.selected + 1 - fit;
+        }
+    }
+}
+
+/// The first selectable index (skipping leading headers), or 0 if none.
+pub fn first_selectable(selectable: &[bool]) -> usize {
+    selectable.iter().position(|&s| s).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -364,22 +392,61 @@ mod tests {
     }
 
     #[test]
-    fn selection_clamps_and_keeps_itself_visible() {
+    fn selection_all_selectable_clamps_and_keeps_itself_visible() {
+        // With no headers, stepping behaves like a plain clamped move.
+        let sel = [true; 10];
         let mut s = MenuState::default();
-        s.move_selection(-1, 10, 3);
+        s.move_selection_skipping(-1, &sel, 3);
         assert_eq!((s.selected, s.scroll), (0, 0));
-        s.move_selection(1, 10, 3);
-        s.move_selection(1, 10, 3);
-        s.move_selection(1, 10, 3); // selected 3: one past the 3-row viewport
+        s.move_selection_skipping(1, &sel, 3);
+        s.move_selection_skipping(1, &sel, 3);
+        s.move_selection_skipping(1, &sel, 3); // selected 3, past a 3-row view
         assert_eq!((s.selected, s.scroll), (3, 1));
-        s.move_selection(100, 10, 3);
-        assert_eq!((s.selected, s.scroll), (9, 7));
-        s.move_selection(-100, 10, 3);
-        assert_eq!((s.selected, s.scroll), (0, 0));
         // An empty list pins everything to zero.
         s.selected = 4;
-        s.move_selection(1, 0, 3);
+        s.move_selection_skipping(1, &[], 3);
         assert_eq!((s.selected, s.scroll), (0, 0));
+    }
+
+    #[test]
+    fn selection_skips_group_headers() {
+        // Layout: [Header, A, B, Header, C] — indices 0 and 3 are headers.
+        let sel = [false, true, true, false, true];
+        let mut s = MenuState {
+            selected: 1,
+            ..Default::default()
+        };
+        // Down from A(1) → B(2).
+        s.move_selection_skipping(1, &sel, 5);
+        assert_eq!(s.selected, 2);
+        // Down from B(2) hops over the header at 3 → C(4).
+        s.move_selection_skipping(1, &sel, 5);
+        assert_eq!(s.selected, 4);
+        // Down at the end is a no-op (no selectable past 4).
+        s.move_selection_skipping(1, &sel, 5);
+        assert_eq!(s.selected, 4);
+        // Up from C(4) hops back over header 3 → B(2).
+        s.move_selection_skipping(-1, &sel, 5);
+        assert_eq!(s.selected, 2);
+        // first_selectable skips the leading header.
+        assert_eq!(first_selectable(&sel), 1);
+        assert_eq!(first_selectable(&[false, false]), 0);
+        assert_eq!(first_selectable(&[]), 0);
+    }
+
+    #[test]
+    fn selection_scroll_reveals_the_group_header_above_it() {
+        // A header at 3 with items 4,5,6; a 2-row viewport.
+        let sel = [true, true, true, false, true, true, true];
+        let mut s = MenuState {
+            selected: 3, // pretend just below; step down to 4
+            scroll: 5,
+            ..Default::default()
+        };
+        s.move_selection_skipping(1, &sel, 2); // → 4, above current scroll(5)
+        assert_eq!(s.selected, 4);
+        // Scroll pulls back to show the header (3) sitting above item 4.
+        assert_eq!(s.scroll, 3);
     }
 
     #[test]

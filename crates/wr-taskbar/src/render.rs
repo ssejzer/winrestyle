@@ -606,10 +606,13 @@ pub struct MenuRow<'a> {
     pub name: &'a str,
     pub selected: bool,
     pub hovered: bool,
-    /// A built-in WinRestyle action (Restore, settings, dev helpers) rather
-    /// than a scanned app — drawn with a resting chip so the action group
-    /// reads as buttons, with a divider after the last one.
-    pub accent: bool,
+    /// A group header ("Admin", "Dev", "Apps") — a dim, non-interactive
+    /// label with a hairline rule above it, not a selectable row.
+    pub header: bool,
+    /// A symbol glyph for a built-in action (Restore/settings/dev), drawn in
+    /// the icon column. `None` on app rows, which get a first-letter chip
+    /// there instead (an async loader will replace it with the real icon).
+    pub glyph: Option<&'a str>,
 }
 
 /// Everything one start-menu paint needs (ADR 0007). The menu derives its
@@ -701,25 +704,71 @@ impl Renderer {
                 self.draw_text(f.filter, &label, &padded(&f.search), &text_brush, true);
             }
 
+            // Header labels sit in their own dim, uppercase format; the icon
+            // column (glyph or first-letter chip) is a square at each row's
+            // left, with the text indented past it. Reserving the column for
+            // every item row keeps actions and apps aligned and leaves the
+            // slot ready for real app icons.
+            let header_fmt = self.text_format(9.0, f.dpi, DWRITE_TEXT_ALIGNMENT_LEADING)?;
+            let glyph_fmt = self.text_format(13.0, f.dpi, DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            let icon = layout::scale(18, f.dpi) as f32;
+            let icon_gap = layout::scale(8, f.dpi) as f32;
+            let hair = layout::scale(1, f.dpi).max(1) as f32;
             for (i, row) in f.rows.iter().enumerate() {
-                // Action rows always carry a resting chip (hovered=true floor)
-                // so they read as buttons; apps only tint on hover/selection.
-                fill_chip(&row.rect, row.selected, row.hovered || row.accent);
-                self.draw_text(row.name, &label, &padded(&row.rect), &text_brush, true);
-                // Divider between the action group and the app list.
-                if row.accent && f.rows.get(i + 1).is_some_and(|n| !n.accent) {
-                    let y = (row.rect.y + row.rect.h) as f32 + layout::scale(1, f.dpi) as f32;
-                    let t = layout::scale(1, f.dpi).max(1) as f32;
-                    self.dc.FillRectangle(
-                        &D2D_RECT_F {
-                            left: row.rect.x as f32,
-                            top: y,
-                            right: (row.rect.x + row.rect.w) as f32,
-                            bottom: y + t,
-                        },
+                let rect = rect_f(&row.rect);
+                if row.header {
+                    // Hairline rule above every header but the first visible row.
+                    if i > 0 {
+                        self.dc.FillRectangle(
+                            &D2D_RECT_F {
+                                left: rect.left,
+                                top: rect.top,
+                                right: rect.right,
+                                bottom: rect.top + hair,
+                            },
+                            &dim_brush,
+                        );
+                    }
+                    self.draw_text(
+                        &row.name.to_uppercase(),
+                        &header_fmt,
+                        &padded(&row.rect),
                         &dim_brush,
+                        true,
                     );
+                    continue;
                 }
+                // Actions (glyph present) carry a resting chip so they read as
+                // buttons; apps only tint on hover/selection.
+                let is_action = row.glyph.is_some();
+                fill_chip(&row.rect, row.selected, row.hovered || is_action);
+                let icon_box = D2D_RECT_F {
+                    left: rect.left + pad,
+                    top: rect.top + (row.rect.h as f32 - icon) / 2.0,
+                    right: rect.left + pad + icon,
+                    bottom: rect.top + (row.rect.h as f32 - icon) / 2.0 + icon,
+                };
+                match row.glyph {
+                    Some(g) => self.draw_text(g, &glyph_fmt, &icon_box, &text_brush, false),
+                    None => {
+                        // App first-letter chip — the icon fallback until the
+                        // async loader supplies the real bitmap.
+                        let letter: String =
+                            row.name.chars().take(1).collect::<String>().to_uppercase();
+                        self.draw_text(&letter, &glyph_fmt, &icon_box, &dim_brush, false);
+                    }
+                }
+                self.draw_text(
+                    row.name,
+                    &label,
+                    &D2D_RECT_F {
+                        left: rect.left + pad + icon + icon_gap,
+                        right: rect.right - pad,
+                        ..rect
+                    },
+                    &text_brush,
+                    true,
+                );
             }
             if f.no_matches {
                 // Where the first row would be; there are no rows to collide

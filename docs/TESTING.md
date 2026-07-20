@@ -370,10 +370,16 @@ itself splits like the manager's:
 3. Esc posted to the `WinRestyleStartMenu` window. ✅ Pass if the log shows
    `start menu closed`.
 
-**Manual (rides T3):** running an action — **Restore Windows desktop** brings
-the standard desktop back mid-session (spawns `wr-installer deactivate`);
-**WinRestyle settings** opens the manager; the dev actions open a terminal /
-launch the suite. Actions filter and launch by keyboard like apps.
+**Manual (rides T3):**
+- **Grouping + icons** (ADR 0007 amendment 2): actions appear under **Admin**
+  and **Dev** headers, apps under **Apps**; each action shows its glyph
+  (`↺ ⚙ ❯ ✓`), each app a first-letter chip in the icon column. Arrow keys skip
+  the headers; typing a filter that matches only apps collapses the action
+  groups (and their headers) away.
+- **Running an action** — **Restore Windows desktop** brings the standard
+  desktop back mid-session (spawns `wr-installer deactivate`); **WinRestyle
+  settings** opens the manager; the dev actions open a terminal / launch the
+  suite. Actions filter and launch by keyboard like apps.
 
 **Manual, once per release (rides T3):**
 

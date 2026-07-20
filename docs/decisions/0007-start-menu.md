@@ -116,6 +116,28 @@ marks action rows with a resting chip and a divider. Dispatch and process
 spawning live in `bar`/`winlist`; `actions.rs` stays pure. No config section
 was added (the dev gate is a path check, not a setting).
 
+## Amendment 2 (2026-07-19) — grouping + icons
+
+The flat "actions then apps" list became **grouped under headers** — `Admin`
+(Restore, settings) and `Dev` (terminal, tests) for the actions, `Apps` for the
+scanned shortcuts — because the whole point of the actions is that they are a
+*different kind* of entry, and unlabelled dividers didn't say so. Headers are
+dim uppercase labels with a hairline rule, non-interactive: the menu content is
+now a single `Vec<MenuEntry>` (`Header | Action | App`) with a parallel
+selectable mask, so arrows skip headers and a filter that empties a group drops
+its header too. The header-skipping selection and group-building are pure and
+unit-tested (`startmenu::move_selection_skipping`/`first_selectable`, `bar`'s
+`build_content` via the `actions`/`apps` filters).
+
+Each row gained an **icon column**: actions draw a Unicode symbol glyph
+(`↺ ⚙ ❯ ✓`) via DirectWrite — font fallback resolves them, so no fragile
+hand-drawn paths or private-use icon-font codepoints — and apps draw a
+first-letter chip there for now. That column is reserved on every item row so
+real app icons (a background `SHGetFileInfoW` loader — a `.lnk` target can block
+on a network path, so it must stay off the UI thread) slot in next with no
+layout change. Consistent with the north star: grouped, glanceable, and a step
+past a plain Windows list rather than a copy of it.
+
 ## Consequences
 
 The Start button's behavior changes (our menu instead of the Win-key tap) —

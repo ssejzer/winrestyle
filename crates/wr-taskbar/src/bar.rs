@@ -122,11 +122,12 @@ struct StartMenu {
     actions: Vec<actions::MenuAction>,
     /// The scanned app list (re-scanned on every open).
     apps: Vec<apps::AppEntry>,
-    /// Indices into `actions` matching the filter.
-    filtered_actions: Vec<usize>,
-    /// Indices into `apps` matching the filter.
-    filtered_apps: Vec<usize>,
-    /// Combined-list index under the mouse (0..filtered_actions+filtered_apps).
+    /// The visible rows in order: group headers interleaved with the filtered
+    /// actions (grouped by category) and apps. Rebuilt on open/filter.
+    content: Vec<MenuEntry>,
+    /// Per-`content` row: whether it can be selected/launched (false = header).
+    selectable: Vec<bool>,
+    /// `content` index under the mouse.
     hovered: Option<usize>,
     /// Whether a `WM_MOUSELEAVE` request is currently armed.
     mouse_tracking: bool,
@@ -1321,7 +1322,7 @@ fn open_menu(bar_hwnd: HWND) {
     let menu_actions = actions::actions(winlist::dev_mode());
     let apps = apps::scan(&apps::roots());
     let n_actions = menu_actions.len();
-    let count = n_actions + apps.len();
+    let n_apps = apps.len();
     let mut wr = RECT::default();
     if unsafe { GetWindowRect(bar_hwnd, &mut wr) }.is_err() {
         return;
@@ -1358,8 +1359,8 @@ fn open_menu(bar_hwnd: HWND) {
                     state: startmenu::MenuState::default(),
                     actions: Vec::new(),
                     apps: Vec::new(),
-                    filtered_actions: Vec::new(),
-                    filtered_apps: Vec::new(),
+                    content: Vec::new(),
+                    selectable: Vec::new(),
                     hovered: None,
                     mouse_tracking: false,
                     visible: false,
@@ -1372,13 +1373,16 @@ fn open_menu(bar_hwnd: HWND) {
     let Some(hwnd) = STATE.with(move |s| {
         let mut s = s.borrow_mut();
         let m = s.as_mut()?.menu.as_mut()?;
-        m.filtered_actions = (0..n_actions).collect();
-        m.filtered_apps = (0..apps.len()).collect();
         m.actions = menu_actions;
         m.apps = apps;
         m.state = startmenu::MenuState::default();
         m.hovered = None;
         m.dpi = dpi;
+        let (content, selectable) = build_content(m);
+        m.state.selected = startmenu::first_selectable(&selectable);
+        let count = content.len();
+        m.content = content;
+        m.selectable = selectable;
         m.layout = startmenu::menu_layout(rect.w, rect.h, dpi, count, 0);
         // A reopen on another monitor resizes the swapchain (no pump: D3D).
         if m.size != (rect.w, rect.h) {
@@ -1413,36 +1417,80 @@ fn open_menu(bar_hwnd: HWND) {
             log::warn!("start menu: foreground refused; keyboard filter unavailable");
         }
     }
-    log::info!(
-        "start menu opened: {} apps, {} actions",
-        count - n_actions,
-        n_actions
-    );
+    log::info!("start menu opened: {n_apps} apps, {n_actions} actions");
     redraw_menu();
 }
 
-/// Map a combined filtered-index (actions then apps) to what it points at.
-/// The single place the actions-before-apps ordering is decoded.
+/// One visible menu row: a group header, or a selectable entry pointing at an
+/// action or an app (by index into `StartMenu::{actions,apps}`).
+enum MenuEntry {
+    Header(&'static str),
+    Action(usize),
+    App(usize),
+}
+
+/// The symbol glyph drawn in an action's icon column. Unicode (rendered via
+/// DirectWrite font fallback), not hand-drawn paths — reliable and crisp.
+fn action_glyph(kind: actions::ActionKind) -> &'static str {
+    use actions::ActionKind::*;
+    match kind {
+        Restore => "\u{21ba}",  // ↺ anticlockwise open circle arrow
+        Settings => "\u{2699}", // ⚙ gear
+        Terminal => "\u{276f}", // ❯ heavy right chevron
+        RunTests => "\u{2713}", // ✓ check mark
+    }
+}
+
+/// Build the visible row list from the current filter: filtered actions
+/// grouped by category (each under its header), then filtered apps under an
+/// "Apps" header. Groups with no matches (and their headers) are omitted, so a
+/// filter that hits only apps shows just the Apps group. Returns the rows and
+/// the parallel selectable mask (headers are not selectable).
+fn build_content(m: &StartMenu) -> (Vec<MenuEntry>, Vec<bool>) {
+    let mut content = Vec::new();
+    let fa = actions::filter_indices(&m.actions, &m.state.filter);
+    for cat in [actions::Category::Admin, actions::Category::Dev] {
+        let mut opened = false;
+        for &ai in &fa {
+            if m.actions[ai].category != cat {
+                continue;
+            }
+            if !opened {
+                content.push(MenuEntry::Header(cat.label()));
+                opened = true;
+            }
+            content.push(MenuEntry::Action(ai));
+        }
+    }
+    let fp = apps::filter_indices(&m.apps, &m.state.filter);
+    if !fp.is_empty() {
+        content.push(MenuEntry::Header("Apps"));
+        content.extend(fp.into_iter().map(MenuEntry::App));
+    }
+    let selectable = content
+        .iter()
+        .map(|e| !matches!(e, MenuEntry::Header(_)))
+        .collect();
+    (content, selectable)
+}
+
+/// What a selectable row points at.
 enum MenuTarget {
     Action(actions::ActionKind),
     App(PathBuf),
 }
 
-fn menu_target(m: &StartMenu, combined: usize) -> Option<MenuTarget> {
-    let n = m.filtered_actions.len();
-    if combined < n {
-        let ai = *m.filtered_actions.get(combined)?;
-        Some(MenuTarget::Action(m.actions.get(ai)?.kind))
-    } else {
-        let ai = *m.filtered_apps.get(combined - n)?;
-        Some(MenuTarget::App(m.apps.get(ai)?.path.clone()))
+fn menu_target(m: &StartMenu, ci: usize) -> Option<MenuTarget> {
+    match m.content.get(ci)? {
+        MenuEntry::Header(_) => None,
+        MenuEntry::Action(ai) => Some(MenuTarget::Action(m.actions.get(*ai)?.kind)),
+        MenuEntry::App(pi) => Some(MenuTarget::App(m.apps.get(*pi)?.path.clone())),
     }
 }
 
-/// Combined filtered-list length (actions + apps) — the count `layout` and
-/// `state` operate on.
+/// Visible-row count — what `layout` and `state` operate on.
 fn menu_len(m: &StartMenu) -> usize {
-    m.filtered_actions.len() + m.filtered_apps.len()
+    m.content.len()
 }
 
 /// Hide the menu. Safe re-entrantly: the `visible` flag flips before the
@@ -1475,24 +1523,35 @@ fn redraw_menu() {
         if !m.visible {
             return;
         }
-        let n_act = m.filtered_actions.len();
         let rows: Vec<MenuRow> = m
             .layout
             .rows
             .iter()
-            .map(|(fidx, rect)| {
-                let (name, accent) = if *fidx < n_act {
-                    (m.actions[m.filtered_actions[*fidx]].label, true)
-                } else {
-                    (m.apps[m.filtered_apps[*fidx - n_act]].name.as_str(), false)
-                };
-                MenuRow {
+            .map(|(ci, rect)| match &m.content[*ci] {
+                MenuEntry::Header(label) => MenuRow {
                     rect: *rect,
-                    name,
-                    selected: *fidx == m.state.selected,
-                    hovered: m.hovered == Some(*fidx),
-                    accent,
-                }
+                    name: label,
+                    selected: false,
+                    hovered: false,
+                    header: true,
+                    glyph: None,
+                },
+                MenuEntry::Action(ai) => MenuRow {
+                    rect: *rect,
+                    name: m.actions[*ai].label,
+                    selected: *ci == m.state.selected,
+                    hovered: m.hovered == Some(*ci),
+                    header: false,
+                    glyph: Some(action_glyph(m.actions[*ai].kind)),
+                },
+                MenuEntry::App(pi) => MenuRow {
+                    rect: *rect,
+                    name: m.apps[*pi].name.as_str(),
+                    selected: *ci == m.state.selected,
+                    hovered: m.hovered == Some(*ci),
+                    header: false,
+                    glyph: None,
+                },
             })
             .collect();
         let frame = MenuFrame {
@@ -1502,7 +1561,7 @@ fn redraw_menu() {
             filter: &m.state.filter,
             rows: &rows,
             scrollbar: m.layout.scrollbar,
-            no_matches: n_act == 0 && m.filtered_apps.is_empty() && !m.state.filter.is_empty(),
+            no_matches: m.content.is_empty() && !m.state.filter.is_empty(),
         };
         match m.renderer.draw_menu(&frame) {
             Ok(()) => {}
@@ -1523,11 +1582,13 @@ fn redraw_menu() {
     });
 }
 
-/// Recompute the filtered lists (actions + apps) and layout after the filter
-/// changed.
+/// Rebuild the grouped row list and layout after the filter changed, resetting
+/// the selection to the first selectable row.
 fn refilter_menu(m: &mut StartMenu) {
-    m.filtered_actions = actions::filter_indices(&m.actions, &m.state.filter);
-    m.filtered_apps = apps::filter_indices(&m.apps, &m.state.filter);
+    let (content, selectable) = build_content(m);
+    m.state.selected = startmenu::first_selectable(&selectable);
+    m.content = content;
+    m.selectable = selectable;
     m.hovered = None;
     m.layout = startmenu::menu_layout(m.size.0, m.size.1, m.dpi, menu_len(m), m.state.scroll);
 }
@@ -1575,7 +1636,10 @@ fn on_menu_key(wparam: WPARAM) {
         };
         let before = m.state.clone();
         let count = menu_len(m);
-        m.state.move_selection(delta, count, m.layout.fit);
+        let fit = m.layout.fit;
+        // Disjoint fields: &mut state, &selectable — the borrow checker splits
+        // them since they are distinct fields of `m`.
+        m.state.move_selection_skipping(delta, &m.selectable, fit);
         if m.state == before {
             return false;
         }

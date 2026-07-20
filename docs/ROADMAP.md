@@ -2,6 +2,11 @@
 
 Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
 
+**North star: a restyle, not a Windows clone.** Every surface should *improve*
+on stock — faster, cleaner, more futuristic — not merely reproduce explorer.
+When a choice is between "what Windows does" and "what's better here," pick
+better (and keep it fast; idle cost stays near zero).
+
 ## Phase 0 — Safety harness & shell-swap spike ✅ (complete 2026-07-18)
 
 > The make-or-break phase. **No UI.** Goal: prove swap → crash → restore is
@@ -175,17 +180,45 @@ Phased plan. Each phase is shippable/demoable on its own and de-risks the next.
       deactivate` detached so it outlives the taskbar's own teardown. Actions
       and apps share one filter/select/scroll list; `actions.rs` pure +
       unit-tested. Automated T17 asserts they're listed. (2026-07-19.)
-- [ ] Row icons (needs an async loader — `SHGetFileInfoW` on shortcut targets
-      can block; letter chips until then).
+- [x] **Grouped actions + glyph icons** (ADR 0007, 2nd amendment): actions sit
+      under **Admin** / **Dev** headers (dim uppercase, hairline rule), apps
+      under **Apps**; each action has a Unicode symbol glyph (↺ ⚙ ❯ ✓, via
+      DirectWrite fallback), each app a first-letter chip in a reserved icon
+      column. Grouping/selection are pure + unit-tested (headers skipped by
+      arrows; filtering collapses empty groups). (2026-07-19.)
+- [ ] **App row icons** — the reserved icon column filled with real shortcut
+      icons via a background loader (`SHGetFileInfoW` on a `.lnk` target can
+      block on network paths, so it must not run on the UI thread; worker
+      decodes to pixels, posts a repaint). *Next up.*
 - [ ] Open via the Win key (needs a keyboard hook).
 - [ ] Pinned / recent sections; power controls (needs shutdown-privilege
       handling; Ctrl+Alt+Del covers swapped sessions meanwhile).
 - [ ] `[startmenu]` config section (theme currently derives from `[taskbar]`).
 
-## Phase 5+ — Beyond
+## Phase 5 — Taskbar system dashboard
 
-- [ ] Theming engine (`wr-theme`): icons, accent colors, msstyles interop.
-- [ ] Icon packs & themes; live customization UI.
+> A glanceable health widget on the bar (right of the tray, left of the clock):
+> one compact indicator at rest, expanding to a panel on click. Futuristic and
+> fast — sampled on a low-frequency timer (idle cost stays near zero), never a
+> busy poll. A restyle improvement, not a Task-Manager clone.
+
+- [ ] Compact health pill: a single at-a-glance state (ok / busy / offline)
+      derived from the metrics below.
+- [ ] Expandable panel: online/connectivity, CPU, GPU, memory, disk, network
+      up/down. Pure formatting/threshold logic in a testable module; the
+      sampling (perf counters / WMI / GPU query) is the thin Windows layer.
+- [ ] Backpressure: sample on a timer only while the panel is open (or at a
+      slow cadence for the pill), so a closed dashboard costs nothing.
+
+## Phase 6 — Theming engine (`wr-theme`)
+
+> The marquee restyle capability, saved for last per the plan.
+
+- [ ] Accent colors, icons, msstyles interop; icon packs & themes.
+- [ ] Live customization UI.
+
+## Phase 7+ — Beyond
+
 - [ ] Multi-client IPC pipe → live *config re-apply* to a running session
       (manager → shell; ADR 0006 deferral). Activate/deactivate is already
       live via process lifecycle (ADR 0008).
