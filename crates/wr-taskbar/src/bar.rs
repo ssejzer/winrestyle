@@ -17,7 +17,7 @@
 //! store results.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -61,8 +61,9 @@ use wr_core::config::{Backdrop, Config, ConfigStore};
 
 use crate::actions;
 use crate::apps;
+use crate::iconload;
 use crate::layout::{self, BarRect, Hit};
-use crate::render::{Frame, MenuFrame, MenuRow, Renderer, TrayItem};
+use crate::render::{Frame, MenuFrame, MenuIcon, MenuRow, Renderer, TrayItem};
 use crate::startmenu;
 use crate::tasks::{self, TaskWindow};
 use crate::tray;
@@ -161,6 +162,15 @@ struct State {
     tray_hwnd: isize,
     /// The start-menu popup; `None` until first opened.
     menu: Option<StartMenu>,
+    /// Background shortcut-icon decoder for the menu's icon column (ADR 0007
+    /// amendment); `None` if the worker thread couldn't start (letter chips).
+    icon_loader: Option<iconload::IconLoader>,
+    /// Decoded menu app icons, keyed by launch path. `Some(None)` = decoded,
+    /// no icon. Persists across menu opens/rebuilds so reopening is instant.
+    app_icons: HashMap<PathBuf, Option<tasks::Icon>>,
+    /// Every app path ever handed to `icon_loader` (decoding or done), so a
+    /// re-scan on the next open re-requests nothing. See `iconload::needed`.
+    app_icons_requested: HashSet<PathBuf>,
     bars: Vec<Bar>,
     /// Id of the registered `CONFIG_CHANGED_MESSAGE` the shell posts to us.
     config_changed_msg: u32,
@@ -221,6 +231,9 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
     }
 
     let pinned = fetch_pinned(&config.taskbar.pinned);
+    // The start-menu icon loader runs off the UI thread; a spawn failure just
+    // means letter chips (see `iconload`), never a startup error.
+    let icon_loader = iconload::IconLoader::spawn();
     let bars = create_bars(&config, topmost, pinned.len())?;
     anyhow::ensure!(!bars.is_empty(), "no monitors to put a taskbar on");
     let primary = HWND(bars[0].hwnd as _);
@@ -268,6 +281,9 @@ pub fn run(store: Arc<ConfigStore>) -> anyhow::Result<()> {
             tray_pixels: HashMap::new(),
             tray_hwnd,
             menu: None,
+            icon_loader,
+            app_icons: HashMap::new(),
+            app_icons_requested: HashSet::new(),
             bars,
             config_changed_msg,
             log_next_paint: true,
@@ -1372,7 +1388,8 @@ fn open_menu(bar_hwnd: HWND) {
 
     let Some(hwnd) = STATE.with(move |s| {
         let mut s = s.borrow_mut();
-        let m = s.as_mut()?.menu.as_mut()?;
+        let st = s.as_mut()?;
+        let m = st.menu.as_mut()?;
         m.actions = menu_actions;
         m.apps = apps;
         m.state = startmenu::MenuState::default();
@@ -1392,7 +1409,22 @@ fn open_menu(bar_hwnd: HWND) {
         }
         m.size = (rect.w, rect.h);
         m.visible = true;
-        Some(m.hwnd)
+        let menu_hwnd = m.hwnd;
+
+        // Kick the async loader for any app icons not already requested. The
+        // scanned list carries every app; the decode + poke happen off-thread,
+        // and the channel send pumps nothing, so this is safe under the borrow.
+        if let Some(loader) = st.icon_loader.as_ref() {
+            let paths: Vec<PathBuf> = m.apps.iter().map(|a| a.path.clone()).collect();
+            let fresh = iconload::needed(&paths, &st.app_icons_requested);
+            for p in &fresh {
+                st.app_icons_requested.insert(p.clone());
+            }
+            if !fresh.is_empty() {
+                loader.request(fresh, menu_hwnd);
+            }
+        }
+        Some(menu_hwnd)
     }) else {
         return;
     };
@@ -1518,7 +1550,12 @@ fn redraw_menu() {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         let Some(st) = s.as_mut() else { return };
-        let State { config, menu, .. } = st;
+        let State {
+            config,
+            menu,
+            app_icons,
+            ..
+        } = st;
         let Some(m) = menu.as_mut() else { return };
         if !m.visible {
             return;
@@ -1535,6 +1572,7 @@ fn redraw_menu() {
                     hovered: false,
                     header: true,
                     glyph: None,
+                    icon: None,
                 },
                 MenuEntry::Action(ai) => MenuRow {
                     rect: *rect,
@@ -1543,15 +1581,23 @@ fn redraw_menu() {
                     hovered: m.hovered == Some(*ci),
                     header: false,
                     glyph: Some(action_glyph(m.actions[*ai].kind)),
+                    icon: None,
                 },
-                MenuEntry::App(pi) => MenuRow {
-                    rect: *rect,
-                    name: m.apps[*pi].name.as_str(),
-                    selected: *ci == m.state.selected,
-                    hovered: m.hovered == Some(*ci),
-                    header: false,
-                    glyph: None,
-                },
+                MenuEntry::App(pi) => {
+                    let path = &m.apps[*pi].path;
+                    MenuRow {
+                        rect: *rect,
+                        name: m.apps[*pi].name.as_str(),
+                        selected: *ci == m.state.selected,
+                        hovered: m.hovered == Some(*ci),
+                        header: false,
+                        glyph: None,
+                        icon: Some(MenuIcon {
+                            key: path,
+                            pixels: app_icons.get(path).and_then(|o| o.as_ref()),
+                        }),
+                    }
+                }
             })
             .collect();
         let frame = MenuFrame {
@@ -1785,9 +1831,37 @@ extern "system" fn menu_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
             on_menu_wheel(((wparam.0 >> 16) as u16 as i16) as i32);
             LRESULT(0)
         }
+        // An off-thread icon decode finished; fold the pixels in and repaint.
+        iconload::WM_APP_ICON_READY => {
+            drain_app_icons();
+            LRESULT(0)
+        }
         // Deliberate teardown only (bar rebuild); never quits the pump.
         WM_DESTROY => LRESULT(0),
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Fold every icon the loader has finished into `app_icons`, then repaint if
+/// the menu is up and anything actually arrived. The channel already holds
+/// each result before its `WM_APP_ICON_READY` post, so one drain collects the
+/// whole burst and the redundant posts find it empty (no wasted repaints).
+fn drain_app_icons() {
+    let repaint = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(st) = s.as_mut() else { return false };
+        let Some(loader) = st.icon_loader.as_ref() else {
+            return false;
+        };
+        let results = loader.drain();
+        let got = !results.is_empty();
+        for (path, icon) in results {
+            st.app_icons.insert(path, icon);
+        }
+        got && st.menu.as_ref().is_some_and(|m| m.visible)
+    });
+    if repaint {
+        redraw_menu();
     }
 }
 

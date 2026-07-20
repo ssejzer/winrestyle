@@ -13,9 +13,10 @@
 //! via WinEvent hooks (`winlist`) — an overflow `»` menu when they don't
 //! fit, tray icons (hosted `Shell_NotifyIcon`, swapped sessions only; ADR
 //! 0005 amendment), and the clock with a date line. Optional DWM
-//! acrylic/mica backdrop and `text_color` theming. Per-app grouping, the
-//! appbar channel, balloons, and menu icons are later polish — see
-//! `docs/ROADMAP.md`.
+//! acrylic/mica backdrop and `text_color` theming. The start menu's icon
+//! column shows real shortcut icons, decoded off the UI thread (`iconload`,
+//! ADR 0007 amendment 3). Per-app grouping, the appbar channel, and balloons
+//! are later polish — see `docs/ROADMAP.md`.
 //!
 //! Spawned and supervised by `wr-shell` (ADR 0005). The taskbar is cosmetic:
 //! a crash here is relaunched by the shell, and a crash-loop makes the shell
@@ -34,6 +35,8 @@ mod actions;
 mod apps;
 #[cfg(windows)]
 mod bar;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod iconload;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
 #[cfg(windows)]

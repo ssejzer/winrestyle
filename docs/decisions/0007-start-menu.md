@@ -138,6 +138,39 @@ on a network path, so it must stay off the UI thread) slot in next with no
 layout change. Consistent with the north star: grouped, glanceable, and a step
 past a plain Windows list rather than a copy of it.
 
+## Amendment 3 (2026-07-20) — the async app-icon loader
+
+The reserved icon column is now filled with real shortcut icons, loaded **off
+the UI thread** (`iconload`). A `.lnk`'s icon comes from `SHGetFileInfoW`, which
+can touch disk or a shortcut's network target and must never stall the thread
+that owns the bars and the pump — so a single background worker thread does the
+decode and the UI thread only ever hands it paths and folds in finished pixels.
+
+- **One worker, process-lifetime.** Spawned in `bar::run` (a spawn failure just
+  means letter chips, never a startup error), it owns its own STA COM apartment
+  — matching the main thread's apartment and the many shell icon handlers that
+  assume one; the decode is synchronous and needs no pump on that thread. Work
+  arrives on an `mpsc` channel of `(path, notify-hwnd)` jobs.
+- **Notify by posted message, drain in bulk.** Each finished icon is sent back
+  on a results channel, then the worker `PostMessageW`s `WM_APP_ICON_READY`
+  (a `WM_APP`-based id) to the menu window. The handler drains *every* ready
+  result at once and repaints once — the channel holds each result before its
+  post, so a burst collapses to one repaint and the redundant posts find the
+  channel empty. `PostMessageW` is the one sanctioned cross-thread poke; it
+  pumps nothing on our side, and a stale handle (menu recreated on a bar
+  rebuild) just fails the post while the pixels wait for the next drain.
+- **Decode once, cache in `State`.** Decoded icons and the "already requested"
+  set live in `State` (which survives bar rebuilds), so reopening the menu is
+  instant and a re-scan re-requests nothing (`iconload::needed`, pure +
+  unit-tested). The renderer uploads each icon to a D2D bitmap lazily as its row
+  scrolls into view, keyed by path, cached for the menu window's lifetime.
+- **Reuse, no new Win32.** The decode is the existing `winlist::pinned_icon`
+  (`SHGetFileInfoW` → GDI → premultiplied BGRA), so the loader adds a thread and
+  a channel, not a new icon pipeline. The only genuinely new design decision is
+  the STA-off-thread choice — flagged here because this project's history is
+  assumptions failing under test; if a shell handler misbehaves without a pump,
+  switch the worker to MTA.
+
 ## Consequences
 
 The Start button's behavior changes (our menu instead of the Win-key tap) —

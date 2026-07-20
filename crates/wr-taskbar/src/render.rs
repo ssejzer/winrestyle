@@ -8,7 +8,7 @@
 //! behind them is DWM's (`bar::apply_backdrop`), not ours.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use windows::core::{w, Interface};
@@ -132,6 +132,11 @@ pub struct Renderer {
     icon_bitmaps: HashMap<isize, ID2D1Bitmap1>,
     /// Uploaded pinned-launcher icons, keyed by path.
     pinned_bitmaps: HashMap<PathBuf, ID2D1Bitmap1>,
+    /// Uploaded start-menu app icons, keyed by launch path. Filled lazily as
+    /// rows come into view and the async loader supplies pixels; never pruned
+    /// (bounded by the app count, and the whole map dies with the menu window's
+    /// renderer on teardown or device loss).
+    menu_app_bitmaps: HashMap<PathBuf, ID2D1Bitmap1>,
     /// Uploaded tray icons, keyed by (owner hwnd, uid), with the revision
     /// they were uploaded at.
     tray_bitmaps: HashMap<(isize, u32), (u32, ID2D1Bitmap1)>,
@@ -194,6 +199,7 @@ impl Renderer {
             dwrite,
             icon_bitmaps: HashMap::new(),
             pinned_bitmaps: HashMap::new(),
+            menu_app_bitmaps: HashMap::new(),
             tray_bitmaps: HashMap::new(),
             _dcomp: dcomp,
             _dcomp_target: dcomp_target,
@@ -540,6 +546,22 @@ impl Renderer {
         }
     }
 
+    /// Upload the app icons that just became available for the rows in this
+    /// menu frame. Only visible rows are in the frame, so icons upload lazily
+    /// as the user scrolls; once cached they stay (the map is small and lives
+    /// only as long as this menu window's renderer). Runs before `BeginDraw`.
+    fn sync_menu_icons(&mut self, f: &MenuFrame) {
+        for row in f.rows {
+            let Some(icon) = &row.icon else { continue };
+            if self.menu_app_bitmaps.contains_key(icon.key) {
+                continue;
+            }
+            if let Some(b) = icon.pixels.and_then(|i| self.upload(i)) {
+                self.menu_app_bitmaps.insert(icon.key.to_path_buf(), b);
+            }
+        }
+    }
+
     /// Upload one decoded icon as a premultiplied D2D bitmap.
     fn upload(&self, icon: &Icon) -> Option<ID2D1Bitmap1> {
         let props = D2D1_BITMAP_PROPERTIES1 {
@@ -610,9 +632,22 @@ pub struct MenuRow<'a> {
     /// label with a hairline rule above it, not a selectable row.
     pub header: bool,
     /// A symbol glyph for a built-in action (Restore/settings/dev), drawn in
-    /// the icon column. `None` on app rows, which get a first-letter chip
-    /// there instead (an async loader will replace it with the real icon).
+    /// the icon column. `None` on action-less rows.
     pub glyph: Option<&'a str>,
+    /// An app row's real icon: its bitmap-cache key plus the decoded pixels
+    /// once the async loader (`iconload`) has them. `None` on headers and
+    /// actions; `pixels: None` (before the loader finishes) draws the
+    /// first-letter chip that the real icon replaces.
+    pub icon: Option<MenuIcon<'a>>,
+}
+
+/// An app row's icon column: the launch path is the renderer's upload-cache
+/// key, so a given app decodes and uploads once and is drawn from the cache on
+/// every later paint (and after scrolling back to it).
+pub struct MenuIcon<'a> {
+    pub key: &'a Path,
+    /// Decoded pixels, or `None` while the loader is still working.
+    pub pixels: Option<&'a Icon>,
 }
 
 /// Everything one start-menu paint needs (ADR 0007). The menu derives its
@@ -635,6 +670,9 @@ impl Renderer {
     /// Draw the start menu and present. Same device-loss contract as
     /// [`Renderer::draw`]: `D2DERR_RECREATE_TARGET` bubbles up.
     pub fn draw_menu(&mut self, f: &MenuFrame) -> windows::core::Result<()> {
+        // Upload any newly-arrived app icons before drawing; failures just
+        // leave a first-letter chip, never a draw error.
+        self.sync_menu_icons(f);
         let size = unsafe { self.dc.GetSize() };
         // The menu floats over application windows; keep it readable by
         // flooring the opacity above the bar's (often lower) setting.
@@ -748,11 +786,25 @@ impl Renderer {
                     right: rect.left + pad + icon,
                     bottom: rect.top + (row.rect.h as f32 - icon) / 2.0 + icon,
                 };
-                match row.glyph {
-                    Some(g) => self.draw_text(g, &glyph_fmt, &icon_box, &text_brush, false),
-                    None => {
-                        // App first-letter chip — the icon fallback until the
-                        // async loader supplies the real bitmap.
+                // Real app icon if the loader has delivered and uploaded it;
+                // action glyph next; else the first-letter chip fallback.
+                let bitmap = row
+                    .icon
+                    .as_ref()
+                    .and_then(|i| self.menu_app_bitmaps.get(i.key));
+                match (bitmap, row.glyph) {
+                    (Some(bitmap), _) => self.dc.DrawBitmap(
+                        bitmap,
+                        Some(&icon_box),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        None,
+                        None,
+                    ),
+                    (None, Some(g)) => self.draw_text(g, &glyph_fmt, &icon_box, &text_brush, false),
+                    (None, None) => {
+                        // First-letter chip until the async loader's real
+                        // bitmap arrives (or when it has none).
                         let letter: String =
                             row.name.chars().take(1).collect::<String>().to_uppercase();
                         self.draw_text(&letter, &glyph_fmt, &icon_box, &dim_brush, false);
